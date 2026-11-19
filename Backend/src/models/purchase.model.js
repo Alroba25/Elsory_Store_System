@@ -2,6 +2,47 @@ const mongoose = require("mongoose");
 
 const roundMoney = (amount) => Number(amount.toFixed(2));
 
+const purchaseAllocationSchema = new mongoose.Schema(
+  {
+    location: {
+      type: String,
+      enum: ["store", "warehouse"],
+      required: true,
+    },
+    quantity: {
+      type: Number,
+      required: true,
+      min: [1, "Allocation quantity must be at least 1"],
+      validate: {
+        validator: Number.isSafeInteger,
+        message: "Allocation quantity must be an integer",
+      },
+    },
+    purchasePrice: {
+      type: Number,
+      required: true,
+      min: [0, "Purchase price cannot be negative"],
+    },
+    productId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Product",
+    },
+    registeredBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+    registeredAt: {
+      type: Date,
+      default: Date.now,
+    },
+    idempotencyKey: {
+      type: String,
+      trim: true,
+    },
+  },
+  { _id: true },
+);
+
 const purchaseItemSchema = new mongoose.Schema({
   productName: {
     type: String,
@@ -66,6 +107,18 @@ const purchaseItemSchema = new mongoose.Schema({
         message: "Registered quantity cannot exceed purchased quantity",
       },
     ],
+  },
+
+  allocations: {
+    type: [purchaseAllocationSchema],
+    default: [],
+    validate: {
+      validator: function (allocations) {
+        const total = allocations.reduce((sum, a) => sum + a.quantity, 0);
+        return total <= this.quantity;
+      },
+      message: "Total allocated quantity cannot exceed purchased quantity",
+    },
   },
 });
 

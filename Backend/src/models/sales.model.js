@@ -67,6 +67,25 @@ const saleItemSchema = new mongoose.Schema(
       },
     },
 
+    // Atomic counter used in Phase 2B+ to prevent concurrent returns from exceeding sold quantity
+    returnedQuantity: {
+      type: Number,
+      default: 0,
+      min: 0,
+      validate: [
+        {
+          validator: Number.isSafeInteger,
+          message: "Returned quantity must be an integer",
+        },
+        {
+          validator: function (value) {
+            return value <= this.quantity;
+          },
+          message: "Returned quantity cannot exceed sold quantity",
+        },
+      ],
+    },
+
     unitPrice: {
       type: Number,
       required: true,

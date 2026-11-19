@@ -87,6 +87,16 @@ const returnedItemSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+
+    condition: {
+      type: String,
+      enum: ["salable", "damaged"],
+    },
+
+    returnTo: {
+      type: String,
+      enum: ["store", "warehouse"],
+    },
   },
   { _id: true },
 );
@@ -191,6 +201,18 @@ const returnSchema = new mongoose.Schema(
       default: "completed",
     },
 
+    idempotencyKey: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+    },
+
+    movementGroupId: {
+      type: String,
+      trim: true,
+    },
+
     returnDate: {
       type: Date,
       default: Date.now,
@@ -201,6 +223,15 @@ const returnSchema = new mongoose.Schema(
 
 // Calculate return and refund amounts
 returnSchema.pre("validate", function () {
+  for (const item of this.items) {
+    if (item.condition === "damaged" && item.returnTo !== undefined) {
+      this.invalidate(
+        "items",
+        "Damaged returned items cannot be routed to store or warehouse",
+      );
+    }
+  }
+
   // Calculate total returned products value
   this.totalRefundAmount = Number(
     this.items.reduce((total, item) => total + item.refundAmount, 0).toFixed(2),
