@@ -461,6 +461,7 @@ const updateUserRole = async (req, res) => {
       "cashier",
       "accessories_seller",
       "phone_seller",
+      "maintenance_seller",
       "general",
     ];
 

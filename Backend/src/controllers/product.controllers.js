@@ -51,10 +51,10 @@ const createProduct = async (req, res) => {
       });
     }
 
-    if (!["phone", "accessory"].includes(type)) {
+    if (!["phone", "accessory", "maintenance"].includes(type)) {
       return res.status(400).json({
         success: false,
-        message: "Type must be phone or accessory",
+        message: "Type must be phone, accessory, or maintenance",
       });
     }
 
@@ -102,12 +102,12 @@ const createProduct = async (req, res) => {
       }
     }
 
-    // 3. Validate accessory data
-    if (type === "accessory") {
+    // 3. Validate quantity-based product data (accessory or maintenance)
+    if (type === "accessory" || type === "maintenance") {
       if (!Number.isSafeInteger(quantity) || quantity <= 0) {
         return res.status(400).json({
           success: false,
-          message: "Accessory quantity must be a positive integer",
+          message: "Product quantity must be a positive integer",
         });
       }
 
@@ -151,9 +151,9 @@ const createProduct = async (req, res) => {
       });
     }
 
-    // 6. Find existing matching accessories
+    // 6. Find existing matching product of the same type (accessory or maintenance)
     const existingAccessories = await Product.find({
-      type: "accessory",
+      type,
       name: name.trim(),
       brand: brand.trim(),
       isActive: true,
@@ -173,10 +173,10 @@ const createProduct = async (req, res) => {
       return sameModel && sameSpecifications;
     });
 
-    // 7. Update existing accessory
+    // 7. Update existing grouped product
     if (existingAccessory) {
       const updatedAccessory = await Product.findOneAndUpdate(
-        { _id: existingAccessory._id, type: "accessory", isActive: true },
+        { _id: existingAccessory._id, type, isActive: true },
         {
           $inc: { quantity },
           $set: {
@@ -275,10 +275,10 @@ const getProducts = async (req, res) => {
       });
     }
     // 3. Validate product type
-    if (type && !["phone", "accessory"].includes(type)) {
+    if (type && !["phone", "accessory", "maintenance"].includes(type)) {
       return res.status(400).json({
         success: false,
-        message: "Type must be phone or accessory",
+        message: "Type must be phone, accessory, or maintenance",
       });
     }
     // 4. Convert price and quantity filters to numbers
@@ -683,10 +683,11 @@ const updateProductStock = async (req, res) => {
         message: "Cannot update stock of an inactive product",
       });
     }
-    if (product.type !== "accessory") {
+    if (!["accessory", "maintenance"].includes(product.type)) {
       return res.status(400).json({
         success: false,
-        message: "Stock management is only available for accessories",
+        message:
+          "Stock management is only available for accessories and maintenance products",
       });
     }
 
@@ -710,7 +711,7 @@ const updateProductStock = async (req, res) => {
     const updatedProduct = await Product.findOneAndUpdate(
       {
         _id: id,
-        type: "accessory",
+        type: product.type,
         isActive: true,
         ...(operation === "decrease" && {
           quantity: { $gte: quantity },
@@ -842,7 +843,7 @@ const getProductByBarcode = async (req, res) => {
     });
   }
 };
-const getAccessoriesProducts = async (req, res) => {
+const getCatalogProductsByType = async (productType, req, res) => {
   try {
     // 1. Pagination
     let page = Number.parseInt(req.query.page, 10);
@@ -903,14 +904,14 @@ const getAccessoriesProducts = async (req, res) => {
       });
     }
 
-    // 4. Build filter (type is fixed to accessory)
+    // 4. Build filter (type is fixed to the requested department)
     const filter = {
-      type: "accessory",
+      type: productType,
       isActive: true,
       quantity: { $gt: 0 },
     };
 
-        if (name?.trim()) {
+    if (name?.trim()) {
       filter.name = {
         $regex: escapeRegex(name.trim()),
         $options: "i",
@@ -971,7 +972,7 @@ const getAccessoriesProducts = async (req, res) => {
       products,
     });
   } catch (error) {
-    console.error("Get Accessories Products Error:", error);
+    console.error(`Get ${productType} Products Error:`, error);
 
     return res.status(500).json({
       success: false,
@@ -979,6 +980,12 @@ const getAccessoriesProducts = async (req, res) => {
     });
   }
 };
+
+const getAccessoriesProducts = (req, res) =>
+  getCatalogProductsByType("accessory", req, res);
+
+const getMaintenanceProducts = (req, res) =>
+  getCatalogProductsByType("maintenance", req, res);
 
 const getPhonesProducts = async (req, res) => {
   try {
@@ -1130,5 +1137,6 @@ module.exports = {
   getInactiveProducts,
   getProductByBarcode,
   getAccessoriesProducts,
+  getMaintenanceProducts,
   getPhonesProducts,
 };

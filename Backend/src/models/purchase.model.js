@@ -25,7 +25,7 @@ const purchaseItemSchema = new mongoose.Schema({
   },
   productType: {
     type: String,
-    enum: ["phone", "accessory"],
+    enum: ["phone", "accessory", "maintenance"],
     required: [true, "Product type is required"],
   },
   quantity: {

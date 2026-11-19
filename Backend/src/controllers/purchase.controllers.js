@@ -63,7 +63,7 @@ const createPurchase = async (req, res) => {
         !item.productName.trim() ||
         typeof item.brand !== "string" ||
         !item.brand.trim() ||
-        !["phone", "accessory"].includes(item.productType) ||
+        !["phone", "accessory", "maintenance"].includes(item.productType) ||
         !Number.isSafeInteger(item.quantity) ||
         item.quantity < 1 ||
         typeof item.purchasePrice !== "number" ||
@@ -458,7 +458,7 @@ const registerPurchasedAccessory = async (req, res) => {
         throw new Error("ITEM_NOT_FOUND");
       }
 
-      if (item.productType !== "accessory") {
+      if (!["accessory", "maintenance"].includes(item.productType)) {
         throw new Error("NOT_AN_ACCESSORY");
       }
 
@@ -481,7 +481,7 @@ const registerPurchasedAccessory = async (req, res) => {
 
       // 5. Find products with matching basic information
       const existingProducts = await Product.find({
-        type: "accessory",
+        type: item.productType,
         name: item.productName,
         brand: item.brand,
         isActive: true,
@@ -521,7 +521,7 @@ const registerPurchasedAccessory = async (req, res) => {
           [
             {
               name: item.productName,
-              type: "accessory",
+              type: item.productType,
               brand: item.brand,
               model: item.model,
               specifications,

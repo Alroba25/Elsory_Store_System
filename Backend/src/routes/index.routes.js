@@ -54,6 +54,7 @@ const {
   getInactiveProducts,
   getProductByBarcode,
   getAccessoriesProducts,
+  getMaintenanceProducts,
   getPhonesProducts,
 } = require("../controllers/product.controllers");
 const {
@@ -145,6 +146,12 @@ router.get(
   middleware,
   authorize("accessories_seller"),
   getAccessoriesProducts,
+);
+router.get(
+  "/products/maintenance",
+  middleware,
+  authorize("maintenance_seller"),
+  getMaintenanceProducts,
 );
 router.get(
   "/products/phones",

@@ -33,6 +33,7 @@ const userSchema = new mongoose.Schema(
         "cashier",
         "accessories_seller",
         "phone_seller",
+        "maintenance_seller",
         "general",
       ],
       default: "general",
