@@ -442,7 +442,7 @@ test(
     );
     expectStatus(accessoryRegistration, 200);
     fixtures.accessoryId = accessoryRegistration.body.data.product._id;
-    assert.equal(accessoryRegistration.body.data.product.quantity, 5);
+    assert.equal(accessoryRegistration.body.data.product.storeQuantity, 5);
     assert.equal(accessoryRegistration.body.data.purchase.status, "completed");
 
     const duplicatePurchaseRegistration = await request(
@@ -504,6 +504,21 @@ test(
     );
     expectStatus(cashierBarcodeLookup, 200);
 
+    // Business rule: cashier cannot sell before opening a shift (409)
+    const saleWithoutShift = await request("POST", "/sales", {
+      cookie: fixtures.cashierCookie,
+      body: {
+        items: [{ product: fixtures.phoneId, quantity: 1 }],
+      },
+    });
+    expectStatus(saleWithoutShift, 409);
+
+    const openShiftResponse = await request("POST", "/shift/open", {
+      cookie: fixtures.cashierCookie,
+      body: { openingCash: 1000 },
+    });
+    expectStatus(openShiftResponse, 201);
+
     const invalidPhoneSale = await request("POST", "/sales", {
       cookie: fixtures.cashierCookie,
       body: {
@@ -511,11 +526,13 @@ test(
       },
     });
     expectStatus(invalidPhoneSale, 400);
+    const phoneAfterInvalidSale = await Product.findById(fixtures.phoneId);
     assert.equal(
-      (await Product.findById(fixtures.phoneId)).quantity,
+      phoneAfterInvalidSale.storeQuantity,
       1,
       "Invalid phone sales must not change stock",
     );
+    assert.equal(phoneAfterInvalidSale.location, "store");
 
     const saleResponse = await request("POST", "/sales", {
       cookie: fixtures.cashierCookie,
@@ -538,8 +555,9 @@ test(
 
     const accessoryAfterSale = await Product.findById(fixtures.accessoryId);
     const phoneAfterSale = await Product.findById(fixtures.phoneId);
-    assert.equal(accessoryAfterSale.quantity, 3);
-    assert.equal(phoneAfterSale.quantity, 0);
+    assert.equal(accessoryAfterSale.storeQuantity, 3);
+    assert.equal(phoneAfterSale.storeQuantity, 0);
+    assert.equal(phoneAfterSale.location, "sold");
 
     const oversell = await request("POST", "/sales", {
       cookie: fixtures.cashierCookie,
@@ -549,7 +567,7 @@ test(
     });
     expectStatus(oversell, 400);
     assert.equal(
-      (await Product.findById(fixtures.accessoryId)).quantity,
+      (await Product.findById(fixtures.accessoryId)).storeQuantity,
       3,
       "Failed sales must roll back stock changes",
     );
@@ -563,7 +581,14 @@ test(
       cookie: fixtures.cashierCookie,
       body: {
         invoiceNumber: fixtures.invoiceNumber,
-        items: [{ saleItem: saleItem._id, quantity: 3 }],
+        items: [
+          {
+            saleItem: saleItem._id,
+            quantity: 3,
+            condition: "salable",
+            returnTo: "store",
+          },
+        ],
       },
     });
     expectStatus(excessiveReturn, 400);
@@ -576,6 +601,8 @@ test(
           {
             saleItem: saleItem._id,
             quantity: 1,
+            condition: "salable",
+            returnTo: "store",
             reason: "Automated integration test",
           },
         ],
@@ -586,7 +613,7 @@ test(
     assert.equal(returnResponse.body.data.refundDue, 25);
     assert.equal(returnResponse.body.data.refundStatus, "pending");
     assert.equal(
-      (await Product.findById(fixtures.accessoryId)).quantity,
+      (await Product.findById(fixtures.accessoryId)).storeQuantity,
       4,
       "Returns must restore stock",
     );
@@ -595,7 +622,14 @@ test(
       cookie: fixtures.cashierCookie,
       body: {
         invoiceNumber: fixtures.invoiceNumber,
-        items: [{ saleItem: saleItem._id, quantity: 2 }],
+        items: [
+          {
+            saleItem: saleItem._id,
+            quantity: 2,
+            condition: "salable",
+            returnTo: "store",
+          },
+        ],
       },
     });
     expectStatus(overReturnAfterPartial, 400);
@@ -657,6 +691,8 @@ test(
           {
             saleItem: debtSale.items[0]._id,
             quantity: 1,
+            condition: "salable",
+            returnTo: "store",
           },
         ],
       },
@@ -666,7 +702,7 @@ test(
     assert.equal(debtReturnResponse.body.data.refundDue, 0);
     assert.equal(debtReturnResponse.body.data.refundStatus, "not_required");
     assert.equal(
-      (await Product.findById(fixtures.accessoryId)).quantity,
+      (await Product.findById(fixtures.accessoryId)).storeQuantity,
       4,
       "Debt returns must restore inventory",
     );
@@ -795,7 +831,7 @@ test(
     expectStatus(restoreProduct, 200);
     assert.equal(restoreProduct.body.product.isActive, true);
     assert.equal(
-      (await Product.findById(fixtures.accessoryId)).quantity,
+      (await Product.findById(fixtures.accessoryId)).storeQuantity,
       4,
       "Restoring an archived product must preserve its stock count",
     );
