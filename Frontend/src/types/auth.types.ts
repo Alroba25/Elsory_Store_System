@@ -37,7 +37,13 @@ export interface AuthUser {
   id: string;
   name: string;
   email: string;
-  role: "owner" | "cashier" | "accessories_seller" | "phone_seller" | "general";
+  role:
+    | "owner"
+    | "cashier"
+    | "accessories_seller"
+    | "phone_seller"
+    | "maintenance_seller"
+    | "general";
 }
 
 export interface AuthResult {

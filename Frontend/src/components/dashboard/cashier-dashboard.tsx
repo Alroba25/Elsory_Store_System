@@ -1162,7 +1162,7 @@ export function CashierDashboard({ user }: CashierDashboardProps) {
                             </div>
 
                             <div className="flex items-center gap-3">
-                              {entry.product.type === "accessory" ? (
+                              {entry.product.type !== "phone" ? (
                                 <div className="inline-flex items-center rounded-xl border border-border bg-surface">
                                   <button
                                     type="button"

@@ -10,6 +10,7 @@ import { isSupportedRole } from "@/src/components/dashboard/dashboard-config";
 import { AccessoriesDashboard } from "@/src/components/dashboard/accessories-dashboard";
 import { CashierDashboard } from "@/src/components/dashboard/cashier-dashboard";
 import { GeneralDashboard } from "@/src/components/dashboard/general-dashboard";
+import { MaintenanceDashboard } from "@/src/components/dashboard/maintenance-dashboard";
 import { OwnerDashboard } from "@/src/components/dashboard/owner-dashboard";
 import { PhoneDashboard } from "@/src/components/dashboard/phone-dashboard";
 
@@ -118,6 +119,8 @@ export function DashboardContent() {
       return <CashierDashboard user={user} />;
     case "accessories_seller":
       return <AccessoriesDashboard user={user} />;
+    case "maintenance_seller":
+      return <MaintenanceDashboard user={user} />;
     case "phone_seller":
       return <PhoneDashboard user={user} />;
     case "general":
