@@ -4,22 +4,59 @@ const API_BASE_URL = "/api";
 
 export class DashboardApiError extends Error {
   public readonly status?: number;
+  public readonly data?: Record<string, unknown>;
 
-  constructor(message: string, status?: number) {
+  constructor(
+    message: string,
+    status?: number,
+    data?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = "DashboardApiError";
     this.status = status;
+    this.data = data;
   }
+}
+
+export function generateIdempotencyKey(prefix: string): string {
+  const randomPart =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+  return `${prefix}-${randomPart}`.slice(0, 120);
 }
 
 /* ============================================================================
  * STRICT BACKEND DATA MODELS
  * ============================================================================ */
 
-export type ProductType = "phone" | "accessory";
+export type ProductType = "phone" | "accessory" | "maintenance";
 export type PhoneCondition = "new" | "used";
 export type PaymentMethod = "cash" | "wallet" | "instapay" | "visa";
 export type CashMovementType = "deposit" | "withdrawal";
+export type StockLocation = "store" | "warehouse";
+export type StockBucketLocation =
+  | "store"
+  | "warehouse"
+  | "damaged"
+  | "unallocated";
+export type PhoneLocation =
+  | "warehouse"
+  | "store"
+  | "sold"
+  | "damaged"
+  | "unallocated";
+export type TransferDirection = "warehouse_to_store" | "store_to_warehouse";
+export type StockMovementType =
+  | "purchase_receive"
+  | "transfer_out"
+  | "transfer_in"
+  | "sale"
+  | "return_salable"
+  | "return_damaged"
+  | "audit_adjustment"
+  | "manual_adjustment"
+  | "legacy_allocation";
 
 export interface StoreProductItem {
   id: string;
@@ -30,7 +67,14 @@ export interface StoreProductItem {
   specifications: Record<string, unknown>;
   barcode?: string;
   sellingPrice: number;
+  costPrice?: number;
+  /** Reflects storeQuantity for POS/catalog display (never legacy quantity). */
   quantity: number;
+  storeQuantity: number;
+  warehouseQuantity: number;
+  damagedQuantity: number;
+  unallocatedQuantity: number;
+  location?: PhoneLocation;
   imei?: string;
   condition?: PhoneCondition;
   batteryHealth?: number;
@@ -603,7 +647,11 @@ async function apiRequest<T = JsonRecord>(
     const message =
       (isRecord(data) && typeof data.message === "string" && data.message) ||
       "تعذر إتمام العملية المطلوبة";
-    throw new DashboardApiError(message, response.status);
+    throw new DashboardApiError(
+      message,
+      response.status,
+      isRecord(data) ? data : undefined,
+    );
   }
 
   if (isRecord(data) && data.success === false) {
@@ -611,24 +659,49 @@ async function apiRequest<T = JsonRecord>(
       typeof data.message === "string"
         ? data.message
         : "رفض الخادم إتمام العملية";
-    throw new DashboardApiError(message, response.status);
+    throw new DashboardApiError(message, response.status, data);
   }
 
   return data as T;
 }
 
+export function normalizeProductType(value: unknown): ProductType {
+  if (value === "phone" || value === "maintenance") return value;
+  return "accessory";
+}
+
 export function normalizeProduct(raw: JsonRecord): StoreProductItem {
   const specs = isRecord(raw.specifications) ? raw.specifications : {};
+  const storeQuantity = asNumber(raw.storeQuantity, 0);
+  const warehouseQuantity = asNumber(raw.warehouseQuantity, 0);
+  const damagedQuantity = asNumber(raw.damagedQuantity, 0);
+  const unallocatedQuantity = asNumber(raw.unallocatedQuantity, 0);
+  const rawLocation = asString(raw.location);
+  const location =
+    rawLocation === "warehouse" ||
+    rawLocation === "store" ||
+    rawLocation === "sold" ||
+    rawLocation === "damaged" ||
+    rawLocation === "unallocated"
+      ? rawLocation
+      : undefined;
+
   return {
     id: asString(raw._id ?? raw.id),
     name: asString(raw.name, "منتج"),
-    type: raw.type === "phone" ? "phone" : "accessory",
+    type: normalizeProductType(raw.type),
     brand: asString(raw.brand),
     model: asString(raw.model) || undefined,
     specifications: specs,
     barcode: asString(raw.barcode) || undefined,
     sellingPrice: asNumber(raw.sellingPrice, 0),
-    quantity: asNumber(raw.quantity, 0),
+    costPrice: asOptionalNumber(raw.costPrice),
+    quantity: storeQuantity,
+    storeQuantity,
+    warehouseQuantity,
+    damagedQuantity,
+    unallocatedQuantity,
+    location,
     imei: asString(raw.imei) || undefined,
     condition:
       raw.condition === "new" || raw.condition === "used"
@@ -663,7 +736,7 @@ function normalizePurchase(raw: JsonRecord): StorePurchaseRecord {
       brand: asString(item.brand),
       model: asString(item.model) || undefined,
       specifications: isRecord(item.specifications) ? item.specifications : {},
-      productType: item.productType === "phone" ? "phone" : "accessory",
+      productType: normalizeProductType(item.productType),
       quantity: asNumber(item.quantity, 1),
       purchasePrice: asNumber(item.purchasePrice, 0),
       totalPrice: asNumber(item.totalPrice, 0),
@@ -707,7 +780,7 @@ function normalizeSale(raw: JsonRecord): StoreSaleRecord {
       id: asString(item._id ?? item.id),
       product: asString(item.product),
       productName: asString(item.productName),
-      productType: item.productType === "phone" ? "phone" : "accessory",
+      productType: normalizeProductType(item.productType),
       brand: asString(item.brand),
       model: asString(item.model) || undefined,
       imei: asString(item.imei) || undefined,
@@ -767,7 +840,7 @@ function normalizeReturn(raw: JsonRecord): StoreReturnRecord {
       saleItem: asString(item.saleItem),
       product: asString(item.product),
       productName: asString(item.productName),
-      productType: item.productType === "phone" ? "phone" : "accessory",
+      productType: normalizeProductType(item.productType),
       imei: asString(item.imei) || undefined,
       quantity: asNumber(item.quantity, 1),
       unitPrice: asNumber(item.unitPrice, 0),
@@ -854,7 +927,8 @@ function normalizeShift(raw: JsonRecord): StoreShiftRecord {
 /* ============================================================================
  * 1. ACCESSORIES SELLER: GET /products/accessories
  * ============================================================================ */
-export async function fetchAccessoriesCatalog(
+async function fetchDepartmentCatalog(
+  endpoint: "/products/accessories" | "/products/maintenance",
   params: Omit<ProductQueryParams, "type" | "maxQuantity"> = {},
 ): Promise<PaginatedProductsResponse> {
   const qs = buildQueryString({
@@ -866,7 +940,7 @@ export async function fetchAccessoriesCatalog(
     maxPrice: params.maxPrice,
     sort: params.sort,
   });
-  const data = await apiRequest<JsonRecord>(`/products/accessories${qs}`, {
+  const data = await apiRequest<JsonRecord>(`${endpoint}${qs}`, {
     method: "GET",
   });
   const rows = Array.isArray(data.products)
@@ -879,6 +953,18 @@ export async function fetchAccessoriesCatalog(
     totalPages: asNumber(data.totalPages, 1),
     products: rows,
   };
+}
+
+export function fetchAccessoriesCatalog(
+  params: Omit<ProductQueryParams, "type" | "maxQuantity"> = {},
+): Promise<PaginatedProductsResponse> {
+  return fetchDepartmentCatalog("/products/accessories", params);
+}
+
+export function fetchMaintenanceCatalog(
+  params: Omit<ProductQueryParams, "type" | "maxQuantity"> = {},
+): Promise<PaginatedProductsResponse> {
+  return fetchDepartmentCatalog("/products/maintenance", params);
 }
 
 /* ============================================================================
@@ -1905,5 +1991,513 @@ export async function fetchReturnsReportForOwner(
       actualRefundedAmount: asNumber(row.actualRefundedAmount, 0),
       pendingRefundAmount: asNumber(row.pendingRefundAmount, 0),
     })),
+  };
+}
+
+/* ============================================================================
+ * 12. WAREHOUSE MANAGEMENT (OWNER ONLY — TRANSFERS, AUDIT, UNALLOCATED, MOVEMENTS)
+ * ============================================================================ */
+
+export interface StockTransferItemRecord {
+  id: string;
+  product: string;
+  productName: string;
+  productType: ProductType;
+  quantity: number;
+  imei?: string;
+  barcode?: string;
+}
+
+export interface StockTransferRecord {
+  id: string;
+  transferNumber: string;
+  direction: TransferDirection;
+  movementGroupId: string;
+  items: StockTransferItemRecord[];
+  createdByName: string;
+  notes: string;
+  createdAt?: string;
+}
+
+export interface StockMovementRecord {
+  id: string;
+  movementGroupId: string;
+  movementType: StockMovementType;
+  product: string;
+  productType: ProductType;
+  imei?: string;
+  location: StockBucketLocation;
+  locationBefore?: PhoneLocation;
+  locationAfter?: PhoneLocation;
+  quantityDelta: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  unitCost?: number;
+  referenceType: string;
+  referenceId?: string;
+  performedByName: string;
+  notes: string;
+  createdAt?: string;
+}
+
+export interface AuditSnapshotRow {
+  product: string;
+  productName: string;
+  brand: string;
+  model: string;
+  productType: ProductType;
+  imei?: string;
+  barcode: string | null;
+  snapshotQuantity: number;
+  unitCost: number | null;
+  costKnown: boolean;
+  totalCostValue: number | null;
+  unitSellingPrice: number;
+  totalSellingValue: number;
+  snapshotUpdatedAt?: string;
+}
+
+export interface AuditSnapshotResponse {
+  location: StockLocation;
+  snapshotTakenAt: string;
+  totalItems: number;
+  categories: {
+    phone: AuditSnapshotRow[];
+    accessory: AuditSnapshotRow[];
+    maintenance: AuditSnapshotRow[];
+  };
+}
+
+export interface AuditCategorySummary {
+  itemsCount: number;
+  systemQty: number;
+  actualQty: number;
+  difference: number;
+  knownCostValue: number;
+  unknownCostItemsCount: number;
+  retailValue: number;
+}
+
+export interface InventoryAuditItemRecord {
+  id: string;
+  product: string;
+  productName: string;
+  productType: ProductType;
+  imei?: string;
+  systemQuantity: number;
+  actualQuantity: number;
+  difference: number;
+  unitCost?: number;
+  costKnown: boolean;
+  totalCostValue?: number;
+  unitSellingPrice: number;
+  totalSellingValue: number;
+}
+
+export interface InventoryAuditRecord {
+  id: string;
+  auditNumber: string;
+  location: StockLocation;
+  movementGroupId?: string;
+  adjustmentsApplied: boolean;
+  items: InventoryAuditItemRecord[];
+  summaryByCategory: {
+    phone: AuditCategorySummary;
+    accessory: AuditCategorySummary;
+    maintenance: AuditCategorySummary;
+  };
+  auditedByName: string;
+  notes: string;
+  createdAt?: string;
+}
+
+export interface AuditChangedProductConflict {
+  productId: string;
+  productName: string;
+  snapshotQuantity: number;
+  liveQuantity: number;
+}
+
+function normalizeTransfer(raw: JsonRecord): StockTransferRecord {
+  const rawItems = Array.isArray(raw.items) ? raw.items.filter(isRecord) : [];
+  return {
+    id: asString(raw._id ?? raw.id),
+    transferNumber: asString(raw.transferNumber),
+    direction:
+      raw.direction === "store_to_warehouse"
+        ? "store_to_warehouse"
+        : "warehouse_to_store",
+    movementGroupId: asString(raw.movementGroupId),
+    items: rawItems.map((it) => ({
+      id: asString(it._id ?? it.id),
+      product: asString(it.product),
+      productName: asString(it.productName, "منتج"),
+      productType: normalizeProductType(it.productType),
+      quantity: asNumber(it.quantity, 1),
+      imei: asString(it.imei) || undefined,
+      barcode: asString(it.barcode) || undefined,
+    })),
+    createdByName: asString(raw.createdByName, "المالك"),
+    notes: asString(raw.notes),
+    createdAt: asString(raw.createdAt) || undefined,
+  };
+}
+
+function normalizeMovement(raw: JsonRecord): StockMovementRecord {
+  const loc = asString(raw.location);
+  const location: StockBucketLocation =
+    loc === "warehouse" || loc === "damaged" || loc === "unallocated"
+      ? loc
+      : "store";
+  return {
+    id: asString(raw._id ?? raw.id),
+    movementGroupId: asString(raw.movementGroupId),
+    movementType: asString(
+      raw.movementType,
+      "manual_adjustment",
+    ) as StockMovementType,
+    product: asString(raw.product),
+    productType: normalizeProductType(raw.productType),
+    imei: asString(raw.imei) || undefined,
+    location,
+    locationBefore: (asString(raw.locationBefore) || undefined) as
+      | PhoneLocation
+      | undefined,
+    locationAfter: (asString(raw.locationAfter) || undefined) as
+      | PhoneLocation
+      | undefined,
+    quantityDelta: asNumber(raw.quantityDelta, 0),
+    balanceBefore: asNumber(raw.balanceBefore, 0),
+    balanceAfter: asNumber(raw.balanceAfter, 0),
+    unitCost: asOptionalNumber(raw.unitCost),
+    referenceType: asString(raw.referenceType),
+    referenceId: asString(raw.referenceId) || undefined,
+    performedByName: asString(raw.performedByName, "مستخدم"),
+    notes: asString(raw.notes),
+    createdAt: asString(raw.createdAt) || undefined,
+  };
+}
+
+function normalizeAuditCategorySummary(raw: unknown): AuditCategorySummary {
+  const r = isRecord(raw) ? raw : {};
+  return {
+    itemsCount: asNumber(r.itemsCount, 0),
+    systemQty: asNumber(r.systemQty, 0),
+    actualQty: asNumber(r.actualQty, 0),
+    difference: asNumber(r.difference, 0),
+    knownCostValue: asNumber(r.knownCostValue, 0),
+    unknownCostItemsCount: asNumber(r.unknownCostItemsCount, 0),
+    retailValue: asNumber(r.retailValue, 0),
+  };
+}
+
+function normalizeAudit(raw: JsonRecord): InventoryAuditRecord {
+  const rawItems = Array.isArray(raw.items) ? raw.items.filter(isRecord) : [];
+  const summary = isRecord(raw.summaryByCategory) ? raw.summaryByCategory : {};
+  return {
+    id: asString(raw._id ?? raw.id),
+    auditNumber: asString(raw.auditNumber),
+    location: raw.location === "warehouse" ? "warehouse" : "store",
+    movementGroupId: asString(raw.movementGroupId) || undefined,
+    adjustmentsApplied: Boolean(raw.adjustmentsApplied),
+    items: rawItems.map((it) => ({
+      id: asString(it._id ?? it.id),
+      product: asString(it.product),
+      productName: asString(it.productName, "منتج"),
+      productType: normalizeProductType(it.productType),
+      imei: asString(it.imei) || undefined,
+      systemQuantity: asNumber(it.systemQuantity, 0),
+      actualQuantity: asNumber(it.actualQuantity, 0),
+      difference: asNumber(it.difference, 0),
+      unitCost: asOptionalNumber(it.unitCost),
+      costKnown: Boolean(it.costKnown),
+      totalCostValue: asOptionalNumber(it.totalCostValue),
+      unitSellingPrice: asNumber(it.unitSellingPrice, 0),
+      totalSellingValue: asNumber(it.totalSellingValue, 0),
+    })),
+    summaryByCategory: {
+      phone: normalizeAuditCategorySummary(summary.phone),
+      accessory: normalizeAuditCategorySummary(summary.accessory),
+      maintenance: normalizeAuditCategorySummary(summary.maintenance),
+    },
+    auditedByName: asString(raw.auditedByName, "المالك"),
+    notes: asString(raw.notes),
+    createdAt: asString(raw.createdAt) || undefined,
+  };
+}
+
+export async function createStockTransfer(
+  payload: {
+    direction: TransferDirection;
+    items: Array<{ product?: string; imei?: string; quantity?: number }>;
+    notes?: string;
+  },
+  idempotencyKey: string,
+): Promise<{ message: string; transfer: StockTransferRecord }> {
+  const data = await apiRequest<JsonRecord>("/transfers", {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(payload),
+  });
+  if (!isRecord(data.transfer)) {
+    throw new DashboardApiError("تعذر قراءة بيانات التحويل");
+  }
+  return {
+    message: asString(data.message, "تم تنفيذ تحويل المخزون بنجاح"),
+    transfer: normalizeTransfer(data.transfer),
+  };
+}
+
+export async function fetchStockTransfers(params?: {
+  direction?: TransferDirection | "";
+  page?: number;
+  limit?: number;
+}): Promise<{
+  transfers: StockTransferRecord[];
+  total: number;
+  currentPage: number;
+  totalPages: number;
+}> {
+  const qs = buildQueryString({
+    direction: params?.direction || undefined,
+    page: params?.page ?? 1,
+    limit: params?.limit ?? 30,
+  });
+  const data = await apiRequest<JsonRecord>(`/transfers${qs}`, {
+    method: "GET",
+  });
+  const rows = Array.isArray(data.transfers)
+    ? data.transfers.filter(isRecord).map(normalizeTransfer)
+    : [];
+  return {
+    transfers: rows,
+    total: asNumber(data.total, rows.length),
+    currentPage: asNumber(data.currentPage, 1),
+    totalPages: asNumber(data.totalPages, 1),
+  };
+}
+
+export async function fetchStockTransferById(transferId: string): Promise<{
+  transfer: StockTransferRecord;
+  movements: StockMovementRecord[];
+}> {
+  const clean = encodeURIComponent(transferId.trim());
+  const data = await apiRequest<JsonRecord>(`/transfers/${clean}`, {
+    method: "GET",
+  });
+  if (!isRecord(data.transfer)) {
+    throw new DashboardApiError("التحويل غير موجود");
+  }
+  const movements = Array.isArray(data.movements)
+    ? data.movements.filter(isRecord).map(normalizeMovement)
+    : [];
+  return {
+    transfer: normalizeTransfer(data.transfer),
+    movements,
+  };
+}
+
+export async function fetchStockMovements(params?: {
+  location?: StockBucketLocation | "";
+  movementType?: StockMovementType | "";
+  movementGroupId?: string;
+  product?: string;
+  page?: number;
+  limit?: number;
+}): Promise<{
+  movements: StockMovementRecord[];
+  total: number;
+  currentPage: number;
+  totalPages: number;
+}> {
+  const qs = buildQueryString({
+    location: params?.location || undefined,
+    movementType: params?.movementType || undefined,
+    movementGroupId: params?.movementGroupId?.trim() || undefined,
+    product: params?.product?.trim() || undefined,
+    page: params?.page ?? 1,
+    limit: params?.limit ?? 50,
+  });
+  const data = await apiRequest<JsonRecord>(`/stock-movements${qs}`, {
+    method: "GET",
+  });
+  const rows = Array.isArray(data.movements)
+    ? data.movements.filter(isRecord).map(normalizeMovement)
+    : [];
+  return {
+    movements: rows,
+    total: asNumber(data.total, rows.length),
+    currentPage: asNumber(data.currentPage, 1),
+    totalPages: asNumber(data.totalPages, 1),
+  };
+}
+
+export async function fetchInventoryAuditSnapshot(
+  location: StockLocation,
+): Promise<AuditSnapshotResponse> {
+  const qs = buildQueryString({ location });
+  const data = await apiRequest<JsonRecord>(`/inventory-audit/snapshot${qs}`, {
+    method: "GET",
+  });
+  const rawCats = isRecord(data.categories) ? data.categories : {};
+  const mapRows = (val: unknown): AuditSnapshotRow[] =>
+    Array.isArray(val)
+      ? val.filter(isRecord).map((row) => ({
+          product: asString(row.product),
+          productName: asString(row.productName, "منتج"),
+          brand: asString(row.brand),
+          model: asString(row.model),
+          productType: normalizeProductType(row.productType),
+          imei: asString(row.imei) || undefined,
+          barcode: asString(row.barcode) || null,
+          snapshotQuantity: asNumber(row.snapshotQuantity, 0),
+          unitCost:
+            row.unitCost === null || row.unitCost === undefined
+              ? null
+              : asNumber(row.unitCost, 0),
+          costKnown: Boolean(row.costKnown),
+          totalCostValue:
+            row.totalCostValue === null || row.totalCostValue === undefined
+              ? null
+              : asNumber(row.totalCostValue, 0),
+          unitSellingPrice: asNumber(row.unitSellingPrice, 0),
+          totalSellingValue: asNumber(row.totalSellingValue, 0),
+          snapshotUpdatedAt: asString(row.snapshotUpdatedAt) || undefined,
+        }))
+      : [];
+
+  return {
+    location: data.location === "warehouse" ? "warehouse" : "store",
+    snapshotTakenAt: asString(data.snapshotTakenAt, new Date().toISOString()),
+    totalItems: asNumber(data.totalItems, 0),
+    categories: {
+      phone: mapRows(rawCats.phone),
+      accessory: mapRows(rawCats.accessory),
+      maintenance: mapRows(rawCats.maintenance),
+    },
+  };
+}
+
+export async function createInventoryAudit(
+  payload: {
+    location: StockLocation;
+    items: Array<{
+      product: string;
+      snapshotQuantity: number;
+      actualQuantity: number;
+    }>;
+    applyAdjustments: boolean;
+    notes?: string;
+  },
+  idempotencyKey: string,
+): Promise<{ message: string; audit: InventoryAuditRecord }> {
+  const data = await apiRequest<JsonRecord>("/inventory-audit", {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(payload),
+  });
+  if (!isRecord(data.audit)) {
+    throw new DashboardApiError("تعذر قراءة نتيجة الجرد");
+  }
+  return {
+    message: asString(data.message, "تم اعتماد الجرد بنجاح"),
+    audit: normalizeAudit(data.audit),
+  };
+}
+
+export async function fetchInventoryAudits(params?: {
+  location?: StockLocation | "";
+  page?: number;
+  limit?: number;
+}): Promise<{
+  audits: InventoryAuditRecord[];
+  total: number;
+  currentPage: number;
+  totalPages: number;
+}> {
+  const qs = buildQueryString({
+    location: params?.location || undefined,
+    page: params?.page ?? 1,
+    limit: params?.limit ?? 20,
+  });
+  const data = await apiRequest<JsonRecord>(`/inventory-audit${qs}`, {
+    method: "GET",
+  });
+  const rows = Array.isArray(data.audits)
+    ? data.audits.filter(isRecord).map(normalizeAudit)
+    : [];
+  return {
+    audits: rows,
+    total: asNumber(data.total, rows.length),
+    currentPage: asNumber(data.currentPage, 1),
+    totalPages: asNumber(data.totalPages, 1),
+  };
+}
+
+export async function fetchInventoryAuditById(auditId: string): Promise<{
+  audit: InventoryAuditRecord;
+  movements: StockMovementRecord[];
+}> {
+  const clean = encodeURIComponent(auditId.trim());
+  const data = await apiRequest<JsonRecord>(`/inventory-audit/${clean}`, {
+    method: "GET",
+  });
+  if (!isRecord(data.audit)) {
+    throw new DashboardApiError("تقرير الجرد غير موجود");
+  }
+  const movements = Array.isArray(data.movements)
+    ? data.movements.filter(isRecord).map(normalizeMovement)
+    : [];
+  return {
+    audit: normalizeAudit(data.audit),
+    movements,
+  };
+}
+
+export function getInventoryAuditCsvUrl(auditId: string): string {
+  return `${API_BASE_URL}/inventory-audit/${encodeURIComponent(auditId.trim())}?format=csv`;
+}
+
+export async function fetchUnallocatedProducts(
+  page = 1,
+  limit = 50,
+): Promise<PaginatedProductsResponse> {
+  const qs = buildQueryString({ page, limit });
+  const data = await apiRequest<JsonRecord>(`/products/unallocated${qs}`, {
+    method: "GET",
+  });
+  const rows = Array.isArray(data.products)
+    ? data.products.filter(isRecord).map(normalizeProduct)
+    : [];
+  return {
+    count: asNumber(data.count, rows.length),
+    totalProducts: asNumber(data.totalProducts, rows.length),
+    currentPage: asNumber(data.currentPage, 1),
+    totalPages: asNumber(data.totalPages, 1),
+    products: rows,
+  };
+}
+
+export async function allocateUnallocatedProductStock(
+  productId: string,
+  payload: {
+    allocations?: Array<{ location: StockLocation; quantity: number }>;
+    targetLocation?: StockLocation;
+    reason: string;
+  },
+  idempotencyKey: string,
+): Promise<{ message: string; product: StoreProductItem }> {
+  const clean = encodeURIComponent(productId.trim());
+  const data = await apiRequest<JsonRecord>(`/products/${clean}/allocate`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(payload),
+  });
+  if (!isRecord(data.product)) {
+    throw new DashboardApiError("تعذر قراءة بيانات المنتج بعد التخصيص");
+  }
+  return {
+    message: asString(data.message, "تم تخصيص المخزون بنجاح"),
+    product: normalizeProduct(data.product),
   };
 }

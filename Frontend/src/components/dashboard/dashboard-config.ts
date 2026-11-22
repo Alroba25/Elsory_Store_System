@@ -49,6 +49,7 @@ const VALID_ROLES: ReadonlySet<string> = new Set<StoreUserRole>([
   "cashier",
   "accessories_seller",
   "phone_seller",
+  "maintenance_seller",
   "general",
 ]);
 
@@ -89,6 +90,30 @@ export const ROLE_CONFIGURATIONS: Readonly<
         description: "إدارة شاملة للمنتجات، المخزون، المنتجات غير النشطة، والباركود",
         icon: Boxes,
         badge: "إدارة كاملة",
+      },
+      {
+        id: "transfers",
+        label: "تحويل المخزون",
+        description: "نقل المنتجات بين المخزن والمحل بالكميات أو IMEI وسجل التحويلات",
+        icon: ArrowLeftRight,
+      },
+      {
+        id: "inventory-audit",
+        label: "جرد المخزون",
+        description: "جرد منفصل للمحل والمخزن (هواتف، إكسسوارات، صيانة) مع التسويات والتصدير",
+        icon: CheckCircle2,
+      },
+      {
+        id: "unallocated",
+        label: "المخزون غير المخصص",
+        description: "توزيع الأرصدة غير المخصصة بين المحل والمخزن بسبب موثق",
+        icon: Package,
+      },
+      {
+        id: "stock-movements",
+        label: "سجل حركات المخزون",
+        description: "سجل محاسبي كامل لجميع حركات الإضافة والخصم والنقل والجرد",
+        icon: History,
       },
       {
         id: "suppliers",
@@ -210,6 +235,42 @@ export const ROLE_CONFIGURATIONS: Readonly<
         id: "availability",
         label: "توفر المنتجات",
         description: "متابعة حالة توفر أصناف الإكسسوارات والكميات المتاحة للعرض",
+        icon: CheckCircle2,
+      },
+    ],
+  },
+
+  maintenance_seller: {
+    role: "maintenance_seller",
+    titleAr: "مساحة عمل قسم الصيانة",
+    badgeAr: "مسؤول قسم الصيانة",
+    departmentAr: "استعراض وفحص منتجات وقطع غيار الصيانة (توجيه البيع للكاشير)",
+    summaryAr:
+      "مساحة مخصصة لاستعراض كتالوج منتجات وقطع غيار الصيانة والبحث عن الأصناف والتحقق من توفرها، بينما تتم عمليات البيع وإصدار الفواتير حصرياً عبر الكاشير.",
+    accentLabel: "كتالوج قسم الصيانة",
+    navItems: [
+      {
+        id: "catalog",
+        label: "كتالوج الصيانة",
+        description: "استعراض جميع منتجات وقطع غيار الصيانة المسجلة بالنظام",
+        icon: Package,
+      },
+      {
+        id: "search",
+        label: "البحث عن منتج صيانة",
+        description: "البحث في منتجات الصيانة بالاسم أو الباركود أو العلامة التجارية",
+        icon: PackageSearch,
+      },
+      {
+        id: "details",
+        label: "تفاصيل المنتج",
+        description: "فحص بيانات وسعر ومواصفات الصنف المحدد",
+        icon: FileSearch,
+      },
+      {
+        id: "availability",
+        label: "توفر منتجات الصيانة",
+        description: "متابعة حالة توفر أصناف الصيانة والكميات المتاحة",
         icon: CheckCircle2,
       },
     ],

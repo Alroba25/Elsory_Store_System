@@ -40,6 +40,10 @@ import {
 } from "@/src/components/dashboard/day-filter-bar";
 import { OwnerAnalyticsWorkspace } from "@/src/components/dashboard/owner-analytics-workspace";
 import {
+  OwnerWarehouseWorkspace,
+  type WarehouseSectionId,
+} from "@/src/components/dashboard/owner-warehouse-workspace";
+import {
   PrintableProductBarcodesModal,
   printProductBarcodesSheet,
 } from "@/src/components/dashboard/printable-product-barcodes-modal";
@@ -1390,6 +1394,7 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                     className="h-10 w-full rounded-xl border border-border bg-background px-3 text-xs font-semibold text-foreground"
                   >
                     <option value="accessory">إكسسوار (Accessory)</option>
+                    <option value="maintenance">صيانة (Maintenance)</option>
                     <option value="phone">هاتف (Phone)</option>
                   </select>
                 </div>
@@ -1451,10 +1456,11 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                   />
                 </div>
 
-                {newProdType === "accessory" ? (
+                {newProdType === "accessory" ||
+                newProdType === "maintenance" ? (
                   <div>
                     <label className="block text-xs font-semibold text-foreground mb-1">
-                      الكمية (للإكسسوار) *
+                      الكمية *
                     </label>
                     <input
                       type="number"
@@ -1751,6 +1757,7 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                       <option value="">كل الأنواع</option>
                       <option value="phone">الهواتف (phone)</option>
                       <option value="accessory">الإكسسوارات (accessory)</option>
+                      <option value="maintenance">الصيانة (maintenance)</option>
                     </select>
 
                     <input
@@ -1816,7 +1823,9 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                         <strong className="text-foreground">
                           {selectedProductDetail.type === "phone"
                             ? "هاتف (phone)"
-                            : "إكسسوار (accessory)"}
+                            : selectedProductDetail.type === "maintenance"
+                              ? "صيانة (maintenance)"
+                              : "إكسسوار (accessory)"}
                         </strong>
                       </span>
                       <span>
@@ -1917,10 +1926,25 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                           {item.brand} {item.model ? `• ${item.model}` : ""}
                         </p>
 
-                        <div className="flex items-center justify-between pt-2 border-t border-border text-xs">
-                          <span className="text-muted">
-                            الكمية: <strong>{item.quantity}</strong>
-                          </span>
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-border text-xs">
+                          <div className="flex flex-wrap items-center gap-2 text-muted">
+                            <span>
+                              المحل: <strong className="text-foreground">{item.storeQuantity}</strong>
+                            </span>
+                            <span>
+                              • المخزن: <strong className="text-foreground">{item.warehouseQuantity}</strong>
+                            </span>
+                            {item.damagedQuantity > 0 ? (
+                              <span className="text-danger">
+                                • تالف: <strong>{item.damagedQuantity}</strong>
+                              </span>
+                            ) : null}
+                            {item.unallocatedQuantity > 0 ? (
+                              <span className="text-amber-600 dark:text-amber-400">
+                                • غير مخصص: <strong>{item.unallocatedQuantity}</strong>
+                              </span>
+                            ) : null}
+                          </div>
                           <span className="font-bold text-foreground">
                             {item.sellingPrice} ج.م
                           </span>
@@ -1963,7 +1987,9 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                           <span>تعديل</span>
                         </button>
 
-                        {item.isActive && item.type === "accessory" ? (
+                        {item.isActive &&
+                        (item.type === "accessory" ||
+                          item.type === "maintenance") ? (
                           <button
                             type="button"
                             onClick={() => setStockTargetProduct(item)}
@@ -2354,6 +2380,7 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                         className="h-9 rounded-lg border border-border bg-surface px-2 text-xs text-foreground"
                       >
                         <option value="accessory">إكسسوار</option>
+                        <option value="maintenance">صيانة</option>
                         <option value="phone">هاتف</option>
                       </select>
 
@@ -3444,6 +3471,9 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                           <option value="accessories_seller">
                             accessories_seller (قسم الإكسسوارات)
                           </option>
+                          <option value="maintenance_seller">
+                            maintenance_seller (قسم الصيانة)
+                          </option>
                           <option value="phone_seller">
                             phone_seller (قسم الموبايلات)
                           </option>
@@ -3472,6 +3502,23 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
         {/* SECTION 9: FINANCIAL & OPERATIONAL REPORTS (from & to YYYY-MM-DD) */}
         {activeSectionId === "reports" ? (
           <OwnerAnalyticsWorkspace initialSectionTab="overview" />
+        ) : null}
+
+        {/* SECTION 10: WAREHOUSE MANAGEMENT (TRANSFERS, AUDIT, UNALLOCATED, MOVEMENTS) */}
+        {activeSectionId === "transfers" ||
+        activeSectionId === "inventory-audit" ||
+        activeSectionId === "unallocated" ||
+        activeSectionId === "stock-movements" ? (
+          <OwnerWarehouseWorkspace
+            section={activeSectionId as WarehouseSectionId}
+            onInventoryMutated={() =>
+              void loadProducts(
+                showInactiveProducts,
+                productTypeFilter,
+                productSearchName,
+              )
+            }
+          />
         ) : null}
       </div>
 
