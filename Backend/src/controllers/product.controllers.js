@@ -7,6 +7,7 @@ const {
   receiveGroupedProductStock,
   receivePhoneStock,
   adjustProductStockManually,
+  allocateUnallocatedStock,
 } = require("../services/inventory.service");
 
 const regexSpecialCharacters = new Set(Array.from(".*+?^$()|[]{}\\"));
@@ -1175,6 +1176,191 @@ const getPhonesProducts = async (req, res) => {
   }
 };
 
+const getUnallocatedProducts = async (req, res) => {
+  try {
+    let page = Number.parseInt(req.query.page, 10);
+    let limit = Number.parseInt(req.query.limit, 10);
+    if (!Number.isInteger(page) || page < 1) page = 1;
+    if (!Number.isInteger(limit) || limit < 1) limit = 50;
+    if (limit > 100) limit = 100;
+
+    const filter = {
+      isActive: true,
+      $or: [
+        { unallocatedQuantity: { $gt: 0 } },
+        { type: "phone", location: "unallocated" },
+      ],
+    };
+
+    const skip = (page - 1) * limit;
+    const [products, totalProducts] = await Promise.all([
+      Product.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      Product.countDocuments(filter),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      count: products.length,
+      totalProducts,
+      currentPage: page,
+      totalPages: Math.ceil(totalProducts / limit),
+      products,
+    });
+  } catch (error) {
+    console.error("Get Unallocated Products Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
+const allocateProductUnallocatedStock = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      allocations: rawAllocations,
+      targetLocation,
+      quantity,
+      reason,
+    } = req.body || {};
+    const idempotencyKey = extractIdempotencyKey(req);
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid product ID",
+      });
+    }
+
+    if (typeof reason !== "string" || !reason.trim()) {
+      return res.status(400).json({
+        success: false,
+        message: "Allocation reason is required",
+      });
+    }
+
+    if (!idempotencyKey || idempotencyKey.length < 8) {
+      return res.status(400).json({
+        success: false,
+        message: "Idempotency key (at least 8 characters) is required",
+      });
+    }
+
+    let normalizedAllocations = null;
+    if (rawAllocations !== undefined) {
+      if (!Array.isArray(rawAllocations) || rawAllocations.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Allocations must be a non-empty array",
+        });
+      }
+      for (const alloc of rawAllocations) {
+        if (
+          !alloc ||
+          !["store", "warehouse"].includes(alloc.location) ||
+          !Number.isSafeInteger(alloc.quantity) ||
+          alloc.quantity < 1
+        ) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Each allocation must specify location ('store' or 'warehouse') and positive integer quantity",
+          });
+        }
+      }
+      normalizedAllocations = rawAllocations.map((a) => ({
+        location: a.location,
+        quantity: a.quantity,
+      }));
+    } else if (["store", "warehouse"].includes(targetLocation)) {
+      if (
+        quantity !== undefined &&
+        (!Number.isSafeInteger(quantity) || quantity < 1)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Quantity must be a positive integer",
+        });
+      }
+      normalizedAllocations = [
+        { location: targetLocation, quantity: quantity ?? 1 },
+      ];
+    } else {
+      return res.status(400).json({
+        success: false,
+        message:
+          "Provide either allocations array or targetLocation ('store' or 'warehouse')",
+      });
+    }
+
+    const movementGroupId = createMovementGroupId();
+
+    const outcome = await withIdempotentTransaction({
+      operation: "legacy_allocation",
+      idempotencyKey,
+      requestPayload: {
+        productId: id,
+        allocations: normalizedAllocations,
+        targetLocation,
+        reason: reason.trim(),
+      },
+      userId: req.user._id,
+      handler: async (session) => {
+        const product = await allocateUnallocatedStock({
+          productId: id,
+          allocations: normalizedAllocations,
+          targetLocation,
+          reason,
+          movementGroupId,
+          user: req.user,
+          session,
+        });
+
+        return {
+          status: 200,
+          body: {
+            success: true,
+            message: "Unallocated stock allocated successfully",
+            product,
+          },
+        };
+      },
+    });
+
+    return res.status(outcome.status).json(outcome.body);
+  } catch (error) {
+    console.error("Allocate Unallocated Stock Error:", error);
+
+    if (error.statusCode === 409) {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    const errorMap = {
+      PRODUCT_NOT_FOUND: [404, "Product not found"],
+      PRODUCT_INACTIVE: [400, "Cannot allocate stock of an inactive product"],
+      INVALID_STOCK_LOCATION: [400, "Location must be 'store' or 'warehouse'"],
+      INSUFFICIENT_UNALLOCATED_STOCK: [
+        400,
+        "Insufficient unallocated stock for this allocation",
+      ],
+    };
+
+    if (errorMap[error.message]) {
+      const [status, message] = errorMap[error.message];
+      return res.status(status).json({ success: false, message });
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error",
+    });
+  }
+};
+
 module.exports = {
   createProduct,
   getProducts,
@@ -1189,4 +1375,6 @@ module.exports = {
   getAccessoriesProducts,
   getMaintenanceProducts,
   getPhonesProducts,
+  getUnallocatedProducts,
+  allocateProductUnallocatedStock,
 };

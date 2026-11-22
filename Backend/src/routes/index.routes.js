@@ -56,7 +56,21 @@ const {
   getAccessoriesProducts,
   getMaintenanceProducts,
   getPhonesProducts,
+  getUnallocatedProducts,
+  allocateProductUnallocatedStock,
 } = require("../controllers/product.controllers");
+const {
+  createTransfer,
+  getTransfers,
+  getTransferById,
+  getStockMovements,
+} = require("../controllers/transfer.controllers");
+const {
+  getAuditSnapshot,
+  createInventoryAudit,
+  getInventoryAudits,
+  getInventoryAuditById,
+} = require("../controllers/audit.controllers");
 const {
   addSupplier,
   getSuppliers,
@@ -164,6 +178,18 @@ router.get(
   middleware,
   authorize("owner"),
   getInactiveProducts,
+);
+router.get(
+  "/products/unallocated",
+  middleware,
+  authorize("owner"),
+  getUnallocatedProducts,
+);
+router.post(
+  "/products/:id/allocate",
+  middleware,
+  authorize("owner"),
+  allocateProductUnallocatedStock,
 );
 router.get("/products/:id", middleware, authorize("owner"), getProductById);
 router.put("/products/:id", middleware, authorize("owner"), updateProduct);
@@ -283,4 +309,41 @@ router.get(
 router.get("/shift/active", middleware, authorize("owner"), getActiveShifts);
 router.get("/shift/reports", middleware, authorize("owner"), getShiftReports);
 router.get("/shift/:id", middleware, authorize("owner"), getShiftById);
+// Warehouse Transfers & Stock Movements (Owner only)
+router.post("/transfers", middleware, authorize("owner"), createTransfer);
+router.get("/transfers", middleware, authorize("owner"), getTransfers);
+router.get("/transfers/:id", middleware, authorize("owner"), getTransferById);
+router.get(
+  "/stock-movements",
+  middleware,
+  authorize("owner"),
+  getStockMovements,
+);
+
+// Inventory Audit (Owner only, separate store & warehouse)
+router.get(
+  "/inventory-audit/snapshot",
+  middleware,
+  authorize("owner"),
+  getAuditSnapshot,
+);
+router.post(
+  "/inventory-audit",
+  middleware,
+  authorize("owner"),
+  createInventoryAudit,
+);
+router.get(
+  "/inventory-audit",
+  middleware,
+  authorize("owner"),
+  getInventoryAudits,
+);
+router.get(
+  "/inventory-audit/:id",
+  middleware,
+  authorize("owner"),
+  getInventoryAuditById,
+);
+
 module.exports = router;
