@@ -1,7 +1,13 @@
-const crypto = require("node:crypto");
 const Product = require("../models/products.model");
 const mongoose = require("mongoose");
-const { isDeepStrictEqual } = require("node:util");
+const {
+  createMovementGroupId,
+  extractIdempotencyKey,
+  withIdempotentTransaction,
+  receiveGroupedProductStock,
+  receivePhoneStock,
+  adjustProductStockManually,
+} = require("../services/inventory.service");
 
 const regexSpecialCharacters = new Set(Array.from(".*+?^$()|[]{}\\"));
 const escapeRegex = (value) =>
@@ -19,7 +25,9 @@ const createProduct = async (req, res) => {
       model,
       specifications = {},
       sellingPrice,
+      costPrice,
       quantity,
+      location = "store",
       imei,
       condition,
       batteryHealth,
@@ -123,102 +131,114 @@ const createProduct = async (req, res) => {
       }
     }
 
-    // 4. Generate a unique barcode
-    const generateBarcode = () =>
-      `2${crypto.randomInt(100000000000, 1000000000000)}`;
+    if (!["store", "warehouse"].includes(location)) {
+      return res.status(400).json({
+        success: false,
+        message: "Location must be store or warehouse",
+      });
+    }
 
-    // 5. Create phone: each device gets its own barcode
-    if (type === "phone") {
-      const product = await Product.create({
-        name,
+    if (
+      costPrice !== undefined &&
+      (typeof costPrice !== "number" ||
+        !Number.isFinite(costPrice) ||
+        costPrice < 0)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Cost price must be a non-negative number",
+      });
+    }
+
+    const idempotencyKey = extractIdempotencyKey(req);
+    const movementGroupId = createMovementGroupId();
+
+    const outcome = await withIdempotentTransaction({
+      operation: "purchase_receive",
+      idempotencyKey,
+      requestPayload: {
+        name: name.trim(),
         type,
-        brand,
-        model,
+        brand: brand.trim(),
+        model: model?.trim() || "",
         specifications,
         sellingPrice,
-        quantity: 1,
-        imei: imei.trim(),
+        costPrice,
+        quantity,
+        location,
+        imei: imei?.trim(),
         condition,
         batteryHealth,
         notes,
-        barcode: generateBarcode(),
-      });
-
-      return res.status(201).json({
-        success: true,
-        message: "Phone created successfully",
-        product,
-      });
-    }
-
-    // 6. Find existing matching product of the same type (accessory or maintenance)
-    const existingAccessories = await Product.find({
-      type,
-      name: name.trim(),
-      brand: brand.trim(),
-      isActive: true,
-    });
-
-    const existingAccessory = existingAccessories.find((product) => {
-      const sameModel = (product.model || "") === (model?.trim() || "");
-
-      const existingSpecifications =
-        product.specifications?.toObject?.() ?? product.specifications ?? {};
-
-      const sameSpecifications = isDeepStrictEqual(
-        existingSpecifications,
-        specifications,
-      );
-
-      return sameModel && sameSpecifications;
-    });
-
-    // 7. Update existing grouped product
-    if (existingAccessory) {
-      const updatedAccessory = await Product.findOneAndUpdate(
-        { _id: existingAccessory._id, type, isActive: true },
-        {
-          $inc: { quantity },
-          $set: {
+      },
+      userId: req.user._id,
+      handler: async (session) => {
+        if (type === "phone") {
+          const phone = await receivePhoneStock({
+            name,
+            brand,
+            model,
+            specifications,
+            imei,
+            condition,
+            batteryHealth,
             sellingPrice,
-            ...(notes !== undefined && { notes }),
-          },
-        },
-        { new: true, runValidators: true },
-      );
+            notes,
+            targetLocation: location,
+            purchasePrice: costPrice,
+            movementGroupId,
+            user: req.user,
+            referenceType: "ManualAdjustment",
+            session,
+          });
 
-      if (!updatedAccessory) {
-        return res.status(409).json({
-          success: false,
-          message: "Accessory changed while stock was being updated",
+          return {
+            status: 201,
+            body: {
+              success: true,
+              message: "Phone created successfully",
+              product: phone,
+            },
+          };
+        }
+
+        const { product, isNew } = await receiveGroupedProductStock({
+          type,
+          name,
+          brand,
+          model,
+          specifications,
+          sellingPrice,
+          notes,
+          allocations: [{ location, quantity }],
+          purchasePrice: costPrice,
+          movementGroupId,
+          user: req.user,
+          referenceType: "ManualAdjustment",
+          session,
         });
-      }
 
-      return res.status(200).json({
-        success: true,
-        message: "Accessory updated successfully",
-        product: updatedAccessory,
+        return {
+          status: isNew ? 201 : 200,
+          body: {
+            success: true,
+            message: isNew
+              ? "Accessory created successfully"
+              : "Accessory updated successfully",
+            product,
+          },
+        };
+      },
+    });
+
+    return res.status(outcome.status).json(outcome.body);
+  } catch (error) {
+    if (error.statusCode === 409) {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
       });
     }
-    // 8. Otherwise, create a new accessory with its own barcode
-    const product = await Product.create({
-      name,
-      type,
-      brand,
-      model,
-      specifications,
-      sellingPrice,
-      quantity,
-      notes,
-      barcode: generateBarcode(),
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: "Accessory created successfully",
-      product,
-    });
-  } catch (error) {
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
@@ -326,10 +346,10 @@ const getProducts = async (req, res) => {
       });
     }
 
-    // 7. Build MongoDB filter
+    // 7. Build MongoDB filter (active products with store or warehouse stock)
     const filter = {
       isActive: true,
-      quantity: { $gt: 0 },
+      $or: [{ storeQuantity: { $gt: 0 } }, { warehouseQuantity: { $gt: 0 } }],
     };
 
     if (name?.trim()) {
@@ -357,7 +377,8 @@ const getProducts = async (req, res) => {
     }
 
     if (maxQuantityNumber !== undefined) {
-      filter.quantity = { $gt: 0, $lte: maxQuantityNumber };
+      delete filter.$or;
+      filter.storeQuantity = { $gt: 0, $lte: maxQuantityNumber };
     }
 
     // 8. Sorting
@@ -556,8 +577,14 @@ const deleteProduct = async (req, res) => {
       });
     }
 
-    // Product must be out of stock before deactivation
-    if (product.quantity > 0) {
+    // Product must have zero stock across all buckets before deactivation
+    const totalRemaining =
+      (product.storeQuantity || 0) +
+      (product.warehouseQuantity || 0) +
+      (product.damagedQuantity || 0) +
+      (product.unallocatedQuantity || 0);
+
+    if (totalRemaining > 0) {
       return res.status(400).json({
         success: false,
         message: "Cannot deactivate a product with available stock",
@@ -646,9 +673,16 @@ const deleteAllProducts = async (req, res) => {
 const updateProductStock = async (req, res) => {
   try {
     const { id } = req.params;
-    const { operation, quantity } = req.body;
+    const { operation, quantity, location, reason } = req.body || {};
+    const idempotencyKey = extractIdempotencyKey(req);
 
-    // 1. Validate operation
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid product ID",
+      });
+    }
+
     if (!["increase", "decrease"].includes(operation)) {
       return res.status(400).json({
         success: false,
@@ -656,7 +690,13 @@ const updateProductStock = async (req, res) => {
       });
     }
 
-    // 2. Validate quantity
+    if (!["store", "warehouse"].includes(location)) {
+      return res.status(400).json({
+        success: false,
+        message: "Location must be 'store' or 'warehouse'",
+      });
+    }
+
     if (
       typeof quantity !== "number" ||
       !Number.isSafeInteger(quantity) ||
@@ -668,77 +708,83 @@ const updateProductStock = async (req, res) => {
       });
     }
 
-    // 3. Check if product exists and is an accessory
-    const product = await Product.findById(id);
-
-    if (!product) {
-      return res.status(404).json({
-        success: false,
-        message: "Product not found",
-      });
-    }
-    if (!product.isActive) {
+    if (typeof reason !== "string" || !reason.trim()) {
       return res.status(400).json({
         success: false,
-        message: "Cannot update stock of an inactive product",
+        message: "Adjustment reason is required",
       });
     }
-    if (!["accessory", "maintenance"].includes(product.type)) {
+
+    if (!idempotencyKey || idempotencyKey.length < 8) {
       return res.status(400).json({
         success: false,
-        message:
-          "Stock management is only available for accessories and maintenance products",
+        message: "Idempotency key (at least 8 characters) is required",
       });
     }
 
-    // 4. Prevent stock from becoming negative
-    if (operation === "decrease" && product.quantity < quantity) {
-      return res.status(400).json({
-        success: false,
-        message: "Insufficient stock",
-      });
-    }
+    const movementGroupId = createMovementGroupId();
 
-    // 5. Update stock atomically
-    const update =
-      operation === "increase"
-        ? { $inc: { quantity } }
-        : {
-            $inc: { quantity: -quantity },
-            // This condition prevents quantity from going below zero.
-          };
-
-    const updatedProduct = await Product.findOneAndUpdate(
-      {
-        _id: id,
-        type: product.type,
-        isActive: true,
-        ...(operation === "decrease" && {
-          quantity: { $gte: quantity },
-        }),
+    const outcome = await withIdempotentTransaction({
+      operation: "manual_adjustment",
+      idempotencyKey,
+      requestPayload: {
+        productId: id,
+        location,
+        operation,
+        quantity,
+        reason: reason.trim(),
       },
-      update,
-      {
-        new: true,
-        runValidators: true,
+      userId: req.user._id,
+      handler: async (session) => {
+        const { product, movement } = await adjustProductStockManually({
+          productId: id,
+          location,
+          operation,
+          quantity,
+          reason,
+          movementGroupId,
+          user: req.user,
+          session,
+        });
+
+        return {
+          status: 200,
+          body: {
+            success: true,
+            message: `Stock ${operation}d successfully`,
+            product,
+            movement,
+          },
+        };
       },
-    );
-
-    if (!updatedProduct) {
-      return res.status(400).json({
-        success: false,
-        message: "Insufficient stock or product cannot be updated",
-      });
-    }
-
-    // 6. Send success response
-    return res.status(200).json({
-      success: true,
-      message: `Stock ${operation}d successfully`,
-      product: updatedProduct,
     });
+
+    return res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error("Update Product Stock Error:", error);
+
+    if (error.statusCode === 409) {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
+
+    const errorMap = {
+      PRODUCT_NOT_FOUND: [404, "Product not found"],
+      PRODUCT_INACTIVE: [400, "Cannot update stock of an inactive product"],
+      STOCK_ADJUSTMENT_UNSUPPORTED_TYPE: [
+        400,
+        "Stock management is only available for accessories and maintenance products",
+      ],
+      INSUFFICIENT_STOCK: [400, "Insufficient stock"],
+      INVALID_STOCK_LOCATION: [400, "Location must be 'store' or 'warehouse'"],
+    };
+
+    if (errorMap[error.message]) {
+      const [status, message] = errorMap[error.message];
+      return res.status(status).json({ success: false, message });
+    }
 
     if (error.name === "CastError") {
       return res.status(400).json({
@@ -820,11 +866,14 @@ const getProductByBarcode = async (req, res) => {
       });
     }
 
-    // 3. Check available stock
-    if (product.quantity <= 0) {
+    // 3. Check available store stock ONLY (warehouse/damaged/unallocated are never sellable)
+    if (
+      product.storeQuantity <= 0 ||
+      (product.type === "phone" && product.location !== "store")
+    ) {
       return res.status(409).json({
         success: false,
-        message: "Product is out of stock",
+        message: "Product is out of stock in store",
       });
     }
 
@@ -904,11 +953,11 @@ const getCatalogProductsByType = async (productType, req, res) => {
       });
     }
 
-    // 4. Build filter (type is fixed to the requested department)
+    // 4. Build filter (type is fixed to the requested department, store stock only)
     const filter = {
       type: productType,
       isActive: true,
-      quantity: { $gt: 0 },
+      storeQuantity: { $gt: 0 },
     };
 
     if (name?.trim()) {
@@ -1048,11 +1097,12 @@ const getPhonesProducts = async (req, res) => {
       });
     }
 
-    // 4. Build filter (type is fixed to phone)
+    // 4. Build filter (type is fixed to phone, store stock only)
     const filter = {
       type: "phone",
       isActive: true,
-      quantity: { $gt: 0 },
+      location: "store",
+      storeQuantity: { $gt: 0 },
     };
 
         if (name?.trim()) {

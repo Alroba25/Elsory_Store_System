@@ -4,12 +4,17 @@ const Sale = require("../models/sales.model");
 const Product = require("../models/products.model");
 const Return = require("../models/returns.model");
 const Shift = require("../models/shift.model");
+const {
+  createMovementGroupId,
+  extractIdempotencyKey,
+  withIdempotentTransaction,
+  restoreStockForReturn,
+} = require("../services/inventory.service");
 
 const createReturn = async (req, res) => {
-  const session = await mongoose.startSession();
-
   try {
     const { invoiceNumber, items } = req.body || {};
+    const idempotencyKey = extractIdempotencyKey(req);
 
     // 1. Validate request
     if (
@@ -48,6 +53,33 @@ const createReturn = async (req, res) => {
         });
       }
 
+      if (!["salable", "damaged"].includes(item.condition)) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Each return item must explicitly specify condition ('salable' or 'damaged')",
+        });
+      }
+
+      if (
+        item.condition === "salable" &&
+        !["store", "warehouse"].includes(item.returnTo)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Salable return items must explicitly specify returnTo ('store' or 'warehouse')",
+        });
+      }
+
+      if (item.condition === "damaged" && item.returnTo !== undefined) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "Damaged return items cannot be routed to store or warehouse",
+        });
+      }
+
       if (seenItems.has(String(item.saleItem))) {
         return res.status(400).json({
           success: false,
@@ -58,201 +90,227 @@ const createReturn = async (req, res) => {
       seenItems.add(String(item.saleItem));
     }
 
-    let createdReturn;
+    const movementGroupId = createMovementGroupId();
 
-    await session.withTransaction(async () => {
-      // 3. Find cashier's open shift
-      const shift = await Shift.findOne({
-        cashier: req.user._id,
-        status: "open",
-      }).session(session);
-
-      if (!shift) {
-        throw new Error("SHIFT_NOT_OPEN");
-      }
-
-      // 4. Find original sale
-      const sale = await Sale.findOne({
+    const outcome = await withIdempotentTransaction({
+      operation: "return",
+      idempotencyKey,
+      requestPayload: {
         invoiceNumber: invoiceNumber.trim(),
-        status: "completed",
-      }).session(session);
+        items,
+      },
+      userId: req.user._id,
+      handler: async (session) => {
+        // 3. Find cashier's open shift
+        const shift = await Shift.findOne({
+          cashier: req.user._id,
+          status: "open",
+        }).session(session);
 
-      if (!sale) {
-        throw new Error("SALE_NOT_FOUND");
-      }
+        if (!shift) {
+          throw new Error("SHIFT_NOT_OPEN");
+        }
 
-      // 5. Get previous completed returns
-      const previousReturns = await Return.find({
-        sale: sale._id,
-        status: "completed",
-      }).session(session);
+        // 4. Find original sale
+        const sale = await Sale.findOne({
+          invoiceNumber: invoiceNumber.trim(),
+          status: "completed",
+        }).session(session);
 
-      const returnedQuantities = new Map();
-      const returnedAmounts = new Map();
+        if (!sale) {
+          throw new Error("SALE_NOT_FOUND");
+        }
 
-      for (const previousReturn of previousReturns) {
-        for (const returnedItem of previousReturn.items) {
-          const key = String(returnedItem.saleItem);
+        // 5. Get previous completed returns for refund amount calculation
+        const previousReturns = await Return.find({
+          sale: sale._id,
+          status: "completed",
+        }).session(session);
 
-          returnedQuantities.set(
-            key,
-            (returnedQuantities.get(key) || 0) + returnedItem.quantity,
+        const returnedAmounts = new Map();
+        for (const previousReturn of previousReturns) {
+          for (const returnedItem of previousReturn.items) {
+            const key = String(returnedItem.saleItem);
+            returnedAmounts.set(
+              key,
+              Number(
+                (
+                  (returnedAmounts.get(key) || 0) + returnedItem.refundAmount
+                ).toFixed(2),
+              ),
+            );
+          }
+        }
+
+        const returnId = new mongoose.Types.ObjectId();
+        const returnItems = [];
+
+        // 6. Atomically reserve returnedQuantity on Sale and route stock
+        for (const requestedItem of items) {
+          const saleItem = sale.items.id(requestedItem.saleItem);
+          if (!saleItem) {
+            throw new Error("SALE_ITEM_NOT_FOUND");
+          }
+
+          if (
+            saleItem.productType === "phone" &&
+            requestedItem.quantity !== 1
+          ) {
+            throw new Error("INVALID_PHONE_RETURN_QUANTITY");
+          }
+
+          const maxPriorReturned = saleItem.quantity - requestedItem.quantity;
+          if (maxPriorReturned < 0) {
+            throw new Error("RETURN_QUANTITY_EXCEEDED");
+          }
+
+          // Atomic reservation prevents concurrent returns from exceeding sold quantity
+          const reservedSale = await Sale.findOneAndUpdate(
+            {
+              _id: sale._id,
+              status: "completed",
+              items: {
+                $elemMatch: {
+                  _id: saleItem._id,
+                  returnedQuantity: { $lte: maxPriorReturned },
+                },
+              },
+            },
+            {
+              $inc: { "items.$.returnedQuantity": requestedItem.quantity },
+            },
+            { returnDocument: "after", session },
           );
 
-          returnedAmounts.set(
-            key,
-            Number(
-              (
-                (returnedAmounts.get(key) || 0) + returnedItem.refundAmount
-              ).toFixed(2),
+          if (!reservedSale) {
+            throw new Error("RETURN_QUANTITY_EXCEEDED");
+          }
+
+          const updatedSaleItem = reservedSale.items.id(saleItem._id);
+          const remainingBeforeThisReturn =
+            saleItem.quantity -
+            (updatedSaleItem.returnedQuantity - requestedItem.quantity);
+
+          const product = await Product.findById(saleItem.product).session(
+            session,
+          );
+          if (!product) {
+            throw new Error("PRODUCT_NOT_FOUND");
+          }
+
+          const originalTotal = saleItem.unitPrice * saleItem.quantity;
+          const netTotal = originalTotal - saleItem.discountAmount;
+          const saleItemKey = String(saleItem._id);
+          const alreadyReturnedAmount = returnedAmounts.get(saleItemKey) || 0;
+          const remainingRefundValue = Number(
+            Math.max(0, netTotal - alreadyReturnedAmount).toFixed(2),
+          );
+          const proportionalRefund = Number(
+            ((netTotal / saleItem.quantity) * requestedItem.quantity).toFixed(
+              2,
             ),
           );
-        }
-      }
+          const refundAmount =
+            requestedItem.quantity === remainingBeforeThisReturn
+              ? remainingRefundValue
+              : Math.min(remainingRefundValue, proportionalRefund);
 
-      const returnItems = [];
+          returnedAmounts.set(
+            saleItemKey,
+            Number((alreadyReturnedAmount + refundAmount).toFixed(2)),
+          );
 
-      // 6. Process returned products
-      for (const requestedItem of items) {
-        const saleItem = sale.items.id(requestedItem.saleItem);
-
-        if (!saleItem) {
-          throw new Error("SALE_ITEM_NOT_FOUND");
-        }
-
-        const alreadyReturned =
-          returnedQuantities.get(String(saleItem._id)) || 0;
-
-        const remainingQuantity = saleItem.quantity - alreadyReturned;
-
-        if (requestedItem.quantity > remainingQuantity) {
-          throw new Error("RETURN_QUANTITY_EXCEEDED");
-        }
-
-        if (saleItem.productType === "phone" && requestedItem.quantity !== 1) {
-          throw new Error("INVALID_PHONE_RETURN_QUANTITY");
-        }
-
-        const product = await Product.findById(saleItem.product).session(
-          session,
-        );
-
-        if (!product) {
-          throw new Error("PRODUCT_NOT_FOUND");
-        }
-
-        // Calculate refund using original invoice price and discount
-        const originalTotal = saleItem.unitPrice * saleItem.quantity;
-        const netTotal = originalTotal - saleItem.discountAmount;
-
-        const saleItemKey = String(saleItem._id);
-        const alreadyReturnedAmount = returnedAmounts.get(saleItemKey) || 0;
-
-        const remainingRefundValue = Number(
-          Math.max(0, netTotal - alreadyReturnedAmount).toFixed(2),
-        );
-
-        const proportionalRefund = Number(
-          ((netTotal / saleItem.quantity) * requestedItem.quantity).toFixed(2),
-        );
-
-        const refundAmount =
-          requestedItem.quantity === remainingQuantity
-            ? remainingRefundValue
-            : Math.min(remainingRefundValue, proportionalRefund);
-
-        returnedAmounts.set(
-          saleItemKey,
-          Number((alreadyReturnedAmount + refundAmount).toFixed(2)),
-        );
-
-        // Restore product stock
-        const updatedProduct = await Product.findOneAndUpdate(
-          { _id: product._id },
-          {
-            $inc: { quantity: requestedItem.quantity },
-            $set: { isActive: true },
-          },
-          {
-            new: true,
+          await restoreStockForReturn({
+            product,
+            quantity: requestedItem.quantity,
+            condition: requestedItem.condition,
+            returnTo: requestedItem.returnTo,
+            returnId,
+            reason: requestedItem.reason,
+            movementGroupId,
+            user: req.user,
             session,
-            runValidators: true,
-          },
-        );
+          });
 
-        if (!updatedProduct) {
-          throw new Error("PRODUCT_UPDATE_FAILED");
+          returnItems.push({
+            saleItem: saleItem._id,
+            product: saleItem.product,
+            productName: saleItem.productName,
+            productType: saleItem.productType,
+            imei: saleItem.imei,
+            quantity: requestedItem.quantity,
+            unitPrice: saleItem.unitPrice,
+            refundAmount,
+            reason: requestedItem.reason?.trim() || "",
+            condition: requestedItem.condition,
+            ...(requestedItem.returnTo && { returnTo: requestedItem.returnTo }),
+          });
         }
 
-        returnItems.push({
-          saleItem: saleItem._id,
-          product: saleItem.product,
-          productName: saleItem.productName,
-          productType: saleItem.productType,
-          imei: saleItem.imei,
-          quantity: requestedItem.quantity,
-          unitPrice: saleItem.unitPrice,
-          refundAmount,
-          reason: requestedItem.reason?.trim() || "",
-        });
-      }
+        // Reload sale with updated returnedQuantity before updating financial totals
+        const freshSale = await Sale.findById(sale._id).session(session);
+        const totalRefundAmount = Number(
+          returnItems
+            .reduce((total, item) => total + item.refundAmount, 0)
+            .toFixed(2),
+        );
+        const amountAppliedToDebt = Number(
+          Math.min(totalRefundAmount, freshSale.remainingAmount).toFixed(2),
+        );
+        const refundDue = Number(
+          (totalRefundAmount - amountAppliedToDebt).toFixed(2),
+        );
 
-      // 7. Calculate total return amount
-      const totalRefundAmount = Number(
-        returnItems
-          .reduce((total, item) => total + item.refundAmount, 0)
-          .toFixed(2),
-      );
+        freshSale.totalReturnedAmount = Number(
+          (freshSale.totalReturnedAmount + totalRefundAmount).toFixed(2),
+        );
+        await freshSale.save({ session });
 
-      // 8. Apply return amount to customer's remaining debt first
-      const amountAppliedToDebt = Number(
-        Math.min(totalRefundAmount, sale.remainingAmount).toFixed(2),
-      );
+        const returnNumber = `RET-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
 
-      // 9. Calculate amount owed to customer
-      const refundDue = Number(
-        (totalRefundAmount - amountAppliedToDebt).toFixed(2),
-      );
+        const [newReturn] = await Return.create(
+          [
+            {
+              _id: returnId,
+              returnNumber,
+              sale: freshSale._id,
+              invoiceNumber: freshSale.invoiceNumber,
+              returnedBy: req.user._id,
+              cashierName: req.user.name,
+              shift: shift._id,
+              items: returnItems,
+              totalRefundAmount,
+              amountAppliedToDebt,
+              refundDue,
+              refundPayments: [],
+              ...(idempotencyKey && { idempotencyKey }),
+              movementGroupId,
+            },
+          ],
+          { session },
+        );
 
-      // 10. Update original sale financial data
-      sale.totalReturnedAmount = Number(
-        (sale.totalReturnedAmount + totalRefundAmount).toFixed(2),
-      );
-
-      await sale.save({ session });
-
-      // 11. Create return record linked to current shift
-      const returnNumber = `RET-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
-
-      const [newReturn] = await Return.create(
-        [
-          {
-            returnNumber,
-            sale: sale._id,
-            invoiceNumber: sale.invoiceNumber,
-            returnedBy: req.user._id,
-            cashierName: req.user.name,
-            shift: shift._id,
-            items: returnItems,
-            totalRefundAmount,
-            amountAppliedToDebt,
-            refundDue,
-            refundPayments: [],
+        return {
+          status: 201,
+          body: {
+            success: true,
+            message: "Return created successfully",
+            data: newReturn,
           },
-        ],
-        { session },
-      );
-
-      createdReturn = newReturn;
+        };
+      },
     });
 
-    return res.status(201).json({
-      success: true,
-      message: "Return created successfully",
-      data: createdReturn,
-    });
+    return res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error("Create Return Error:", error);
+
+    if (error.statusCode === 409) {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
 
     const errors = {
       SHIFT_NOT_OPEN: [409, "You must have an open shift to create a return"],
@@ -266,6 +324,7 @@ const createReturn = async (req, res) => {
         400,
         "Each phone must be returned individually",
       ],
+      PHONE_NOT_SOLD: [400, "Phone is not currently in sold state"],
       PRODUCT_NOT_FOUND: [404, "Product not found in inventory"],
       PRODUCT_UPDATE_FAILED: [400, "Could not update product stock"],
     };
@@ -290,8 +349,6 @@ const createReturn = async (req, res) => {
       success: false,
       message: "Server error",
     });
-  } finally {
-    await session.endSession();
   }
 };
 const processRefund = async (req, res) => {

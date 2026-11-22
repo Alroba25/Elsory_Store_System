@@ -159,7 +159,7 @@ test("Phase 1: maintenance_seller role, permissions, and maintenance product gro
   assert.equal(m2.status, 200, JSON.stringify(m2.body));
   assert.equal(m2.body.product._id, m1.body.product._id);
   assert.equal(m2.body.product.barcode, m1.body.product.barcode);
-  assert.equal(m2.body.product.quantity, 5);
+  assert.equal(m2.body.product.storeQuantity, 5);
 
   // Also create an accessory and a phone
   const accProd = await request("POST", "/products", {
@@ -194,7 +194,7 @@ test("Phase 1: maintenance_seller role, permissions, and maintenance product gro
   assert.equal(maintCatalog.status, 200, JSON.stringify(maintCatalog.body));
   assert.equal(maintCatalog.body.products.length, 1);
   assert.equal(maintCatalog.body.products[0].type, "maintenance");
-  assert.equal(maintCatalog.body.products[0].quantity, 5);
+  assert.equal(maintCatalog.body.products[0].storeQuantity, 5);
 
   // 5. maintenance_seller is blocked (403) from phones, accessories, owner, and sales APIs
   const forbiddenPaths = [

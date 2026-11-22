@@ -3,11 +3,15 @@ const crypto = require("node:crypto");
 const Sale = require("../models/sales.model");
 const Product = require("../models/products.model");
 const Shift = require("../models/shift.model");
+const {
+  createMovementGroupId,
+  extractIdempotencyKey,
+  withIdempotentTransaction,
+  deductStoreStockForSale,
+} = require("../services/inventory.service");
 //create sale controller
 
 const createSale = async (req, res) => {
-  const session = await mongoose.startSession();
-
   try {
     const {
       customerName,
@@ -15,6 +19,7 @@ const createSale = async (req, res) => {
       items,
       payments = [],
     } = req.body || {};
+    const idempotencyKey = extractIdempotencyKey(req);
 
     if (
       (customerName !== undefined &&
@@ -78,157 +83,176 @@ const createSale = async (req, res) => {
       });
     }
 
-    let createdSale;
+    const movementGroupId = createMovementGroupId();
 
-    await session.withTransaction(async () => {
-      // 1. Find cashier's open shift
-      const shift = await Shift.findOne({
-        cashier: req.user._id,
-        status: "open",
-      }).session(session);
+    const outcome = await withIdempotentTransaction({
+      operation: "sale",
+      idempotencyKey,
+      requestPayload: {
+        customerName: customerName?.trim() || "",
+        customerPhone: customerPhone?.trim() || "",
+        items,
+        payments,
+      },
+      userId: req.user._id,
+      handler: async (session) => {
+        // 1. Find cashier's open shift
+        const shift = await Shift.findOne({
+          cashier: req.user._id,
+          status: "open",
+        }).session(session);
 
-      if (!shift) {
-        throw new Error("SHIFT_NOT_OPEN");
-      }
-
-      // 2. Calculate payments per method
-      const sumByMethod = (method) =>
-        payments
-          .filter((payment) => payment.method === method)
-          .reduce((total, payment) => total + payment.amount, 0);
-
-      const cashPaymentsTotal = sumByMethod("cash");
-      const visaPaymentsTotal = sumByMethod("visa");
-      const instapayPaymentsTotal = sumByMethod("instapay");
-      const walletPaymentsTotal = sumByMethod("wallet");
-
-      const saleItems = [];
-
-      // 3. Validate products and prepare invoice items
-      for (const item of items) {
-        const { product, quantity, discountAmount = 0, isGift = false } = item;
-
-        if (
-          !Number.isSafeInteger(quantity) ||
-          quantity <= 0 ||
-          typeof discountAmount !== "number" ||
-          !Number.isFinite(discountAmount) ||
-          discountAmount < 0 ||
-          typeof isGift !== "boolean"
-        ) {
-          throw new Error("INVALID_ITEM_DATA");
+        if (!shift) {
+          throw new Error("SHIFT_NOT_OPEN");
         }
 
-        const existingProduct =
-          await Product.findById(product).session(session);
+        // 2. Calculate payments per method
+        const sumByMethod = (method) =>
+          payments
+            .filter((payment) => payment.method === method)
+            .reduce((total, payment) => total + payment.amount, 0);
 
-        if (!existingProduct || !existingProduct.isActive) {
-          throw new Error("PRODUCT_NOT_AVAILABLE");
+        const cashPaymentsTotal = sumByMethod("cash");
+        const visaPaymentsTotal = sumByMethod("visa");
+        const instapayPaymentsTotal = sumByMethod("instapay");
+        const walletPaymentsTotal = sumByMethod("wallet");
+
+        const saleId = new mongoose.Types.ObjectId();
+        const saleItems = [];
+
+        // 3. Validate products and deduct strictly from storeQuantity
+        for (const item of items) {
+          const {
+            product,
+            quantity,
+            discountAmount = 0,
+            isGift = false,
+          } = item;
+
+          if (
+            !Number.isSafeInteger(quantity) ||
+            quantity <= 0 ||
+            typeof discountAmount !== "number" ||
+            !Number.isFinite(discountAmount) ||
+            discountAmount < 0 ||
+            typeof isGift !== "boolean"
+          ) {
+            throw new Error("INVALID_ITEM_DATA");
+          }
+
+          const existingProduct =
+            await Product.findById(product).session(session);
+
+          if (!existingProduct || !existingProduct.isActive) {
+            throw new Error("PRODUCT_NOT_AVAILABLE");
+          }
+
+          if (existingProduct.type === "phone" && quantity !== 1) {
+            throw new Error("PHONE_QUANTITY_INVALID");
+          }
+
+          const itemTotal = existingProduct.sellingPrice * quantity;
+          const finalDiscount = isGift ? itemTotal : discountAmount;
+
+          if (finalDiscount > itemTotal) {
+            throw new Error("INVALID_DISCOUNT");
+          }
+
+          // 4. Deduct store stock atomically via unified inventory service
+          await deductStoreStockForSale({
+            product: existingProduct,
+            quantity,
+            saleId,
+            movementGroupId,
+            user: req.user,
+            session,
+          });
+
+          // 5. Save product snapshot
+          saleItems.push({
+            product: existingProduct._id,
+            productName: existingProduct.name,
+            productType: existingProduct.type,
+            brand: existingProduct.brand,
+            model: existingProduct.model,
+            imei:
+              existingProduct.type === "phone"
+                ? existingProduct.imei
+                : undefined,
+            quantity,
+            unitPrice: existingProduct.sellingPrice,
+            discountAmount: finalDiscount,
+            isGift,
+          });
         }
 
-        if (existingProduct.type === "phone" && quantity !== 1) {
-          throw new Error("PHONE_QUANTITY_INVALID");
-        }
+        // 6. Generate invoice number
+        const invoiceNumber = `INV-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
 
-        const itemTotal = existingProduct.sellingPrice * quantity;
-        const finalDiscount = isGift ? itemTotal : discountAmount;
+        // 7. Create sale linked to the current shift
+        const [sale] = await Sale.create(
+          [
+            {
+              _id: saleId,
+              invoiceNumber,
+              customerName: customerName?.trim() || "",
+              customerPhone: customerPhone?.trim() || "",
+              cashier: req.user._id,
+              cashierName: req.user.name,
+              shift: shift._id,
+              items: saleItems,
+              payments,
+            },
+          ],
+          { session },
+        );
 
-        if (finalDiscount > itemTotal) {
-          throw new Error("INVALID_DISCOUNT");
-        }
-
-        // 4. Decrease stock atomically
-        const updatedProduct = await Product.findOneAndUpdate(
+        // 8. Update shift totals across all payment methods
+        const updatedShift = await Shift.findOneAndUpdate(
           {
-            _id: existingProduct._id,
-            isActive: true,
-            quantity: { $gte: quantity },
+            _id: shift._id,
+            status: "open",
           },
           {
-            $inc: { quantity: -quantity },
+            $inc: {
+              totalCashSales: cashPaymentsTotal,
+              totalVisaSales: visaPaymentsTotal,
+              totalInstapaySales: instapayPaymentsTotal,
+              totalWalletSales: walletPaymentsTotal,
+            },
           },
           {
-            new: true,
+            returnDocument: "after",
             session,
             runValidators: true,
           },
         );
 
-        if (!updatedProduct) {
-          throw new Error("INSUFFICIENT_STOCK");
+        if (!updatedShift) {
+          throw new Error("SHIFT_NOT_OPEN");
         }
 
-        // 5. Save product snapshot
-        saleItems.push({
-          product: existingProduct._id,
-          productName: existingProduct.name,
-          productType: existingProduct.type,
-          brand: existingProduct.brand,
-          model: existingProduct.model,
-          imei:
-            existingProduct.type === "phone" ? existingProduct.imei : undefined,
-          quantity,
-          unitPrice: existingProduct.sellingPrice,
-          discountAmount: finalDiscount,
-          isGift,
-        });
-      }
-
-      // 6. Generate invoice number
-      const invoiceNumber = `INV-${Date.now()}-${crypto.randomInt(1000, 9999)}`;
-
-      // 7. Create sale linked to the current shift
-      const [sale] = await Sale.create(
-        [
-          {
-            invoiceNumber,
-            customerName: customerName?.trim() || "",
-            customerPhone: customerPhone?.trim() || "",
-            cashier: req.user._id,
-            cashierName: req.user.name,
-            shift: shift._id,
-            items: saleItems,
-            payments,
+        return {
+          status: 201,
+          body: {
+            success: true,
+            message: "Sale created successfully",
+            sale,
           },
-        ],
-        { session },
-      );
-
-      // 8. Update shift totals across all payment methods
-      const updatedShift = await Shift.findOneAndUpdate(
-        {
-          _id: shift._id,
-          status: "open",
-        },
-        {
-          $inc: {
-            totalCashSales: cashPaymentsTotal,
-            totalVisaSales: visaPaymentsTotal,
-            totalInstapaySales: instapayPaymentsTotal,
-            totalWalletSales: walletPaymentsTotal,
-          },
-        },
-        {
-          new: true,
-          session,
-          runValidators: true,
-        },
-      );
-
-      if (!updatedShift) {
-        throw new Error("SHIFT_NOT_OPEN");
-      }
-
-      createdSale = sale;
+        };
+      },
     });
 
-    return res.status(201).json({
-      success: true,
-      message: "Sale created successfully",
-      sale: createdSale,
-    });
+    return res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error("Create Sale Error:", error);
+
+    if (error.statusCode === 409) {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
 
     const errors = {
       SHIFT_NOT_OPEN: {
@@ -282,8 +306,6 @@ const createSale = async (req, res) => {
       success: false,
       message: "Internal server error",
     });
-  } finally {
-    await session.endSession();
   }
 };
 

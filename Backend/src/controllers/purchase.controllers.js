@@ -1,9 +1,14 @@
 const Purchase = require("../models/purchase.model");
 const Supplier = require("../models/supplier.model");
 const mongoose = require("mongoose");
-const crypto = require("crypto");
-const Product = require("../models/products.model");
 const { isDeepStrictEqual } = require("node:util");
+const {
+  createMovementGroupId,
+  extractIdempotencyKey,
+  withIdempotentTransaction,
+  receivePhoneStock,
+  receiveGroupedProductStock,
+} = require("../services/inventory.service");
 const createPurchase = async (req, res) => {
   try {
     const { supplier, items, paidAmount = 0, notes } = req.body;
@@ -219,11 +224,17 @@ const getPurchaseById = async (req, res) => {
   }
 };
 const registerPurchasedPhone = async (req, res) => {
-  const session = await mongoose.startSession();
-
   try {
     const { purchaseId, itemId } = req.params;
-    const { imei, sellingPrice, condition, batteryHealth, notes } = req.body;
+    const {
+      imei,
+      sellingPrice,
+      condition,
+      batteryHealth,
+      notes,
+      targetLocation = "store",
+    } = req.body;
+    const idempotencyKey = extractIdempotencyKey(req);
 
     // 1. Validate IDs
     if (
@@ -233,6 +244,13 @@ const registerPurchasedPhone = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "Invalid purchase or item ID",
+      });
+    }
+
+    if (!["store", "warehouse"].includes(targetLocation)) {
+      return res.status(400).json({
+        success: false,
+        message: "targetLocation must be 'store' or 'warehouse'",
       });
     }
 
@@ -275,91 +293,95 @@ const registerPurchasedPhone = async (req, res) => {
       });
     }
 
-    // 3. Start transaction
-    let createdProduct;
-    let updatedPurchase;
+    const movementGroupId = createMovementGroupId();
 
-    await session.withTransaction(async () => {
-      // Find purchase
-      const purchase = await Purchase.findById(purchaseId).session(session);
+    const outcome = await withIdempotentTransaction({
+      operation: "purchase_receive",
+      idempotencyKey,
+      requestPayload: {
+        purchaseId,
+        itemId,
+        imei: imei.trim(),
+        sellingPrice,
+        condition,
+        batteryHealth,
+        notes,
+        targetLocation,
+      },
+      userId: req.user._id,
+      handler: async (session) => {
+        const purchase = await Purchase.findById(purchaseId).session(session);
+        if (!purchase) throw new Error("PURCHASE_NOT_FOUND");
+        if (purchase.status === "cancelled") throw new Error("PURCHASE_CANCELLED");
 
-      if (!purchase) {
-        throw new Error("PURCHASE_NOT_FOUND");
-      }
+        const item = purchase.items.id(itemId);
+        if (!item) throw new Error("ITEM_NOT_FOUND");
+        if (item.productType !== "phone") throw new Error("NOT_A_PHONE");
+        if (item.registeredQuantity >= item.quantity) {
+          throw new Error("QUANTITY_COMPLETED");
+        }
 
-      if (purchase.status === "cancelled") {
-        throw new Error("PURCHASE_CANCELLED");
-      }
+        const createdProduct = await receivePhoneStock({
+          name: item.productName,
+          brand: item.brand,
+          model: item.model,
+          specifications:
+            item.specifications?.toObject?.() ?? item.specifications ?? {},
+          imei,
+          condition,
+          batteryHealth,
+          sellingPrice,
+          notes,
+          targetLocation,
+          purchaseId: purchase._id,
+          purchasePrice: item.purchasePrice,
+          movementGroupId,
+          user: req.user,
+          referenceType: "Purchase",
+          referenceId: purchase._id,
+          session,
+        });
 
-      // Find purchase item
-      const item = purchase.items.id(itemId);
+        item.registeredQuantity += 1;
+        item.allocations.push({
+          location: targetLocation,
+          quantity: 1,
+          purchasePrice: item.purchasePrice,
+          productId: createdProduct._id,
+          registeredBy: req.user._id,
+          registeredAt: new Date(),
+          ...(idempotencyKey && { idempotencyKey }),
+        });
 
-      if (!item) {
-        throw new Error("ITEM_NOT_FOUND");
-      }
+        if (purchase.items.every((pi) => pi.registeredQuantity === pi.quantity)) {
+          purchase.status = "completed";
+        }
+        await purchase.save({ session });
 
-      // Check product type
-      if (item.productType !== "phone") {
-        throw new Error("NOT_A_PHONE");
-      }
-
-      // Check remaining quantity
-      if (item.registeredQuantity >= item.quantity) {
-        throw new Error("QUANTITY_COMPLETED");
-      }
-
-      // Generate barcode
-      const barcode = `2${crypto.randomInt(100000000000, 1000000000000)}`;
-
-      // Create product
-      const products = await Product.create(
-        [
-          {
-            name: item.productName,
-            type: "phone",
-            brand: item.brand,
-            model: item.model,
-            barcode,
-            imei,
-            sellingPrice,
-            quantity: 1,
-            condition,
-            batteryHealth,
-            notes,
+        return {
+          status: 201,
+          body: {
+            success: true,
+            message: "Phone registered successfully",
+            data: {
+              product: createdProduct,
+              purchase,
+            },
           },
-        ],
-        { session },
-      );
-
-      createdProduct = products[0];
-
-      // Increase registered quantity
-      item.registeredQuantity += 1;
-
-      // Check if all items are registered
-      const allItemsRegistered = purchase.items.every(
-        (item) => item.registeredQuantity === item.quantity,
-      );
-
-      if (allItemsRegistered) {
-        purchase.status = "completed";
-      }
-      // Save updated purchase
-      await purchase.save({ session });
-
-      updatedPurchase = purchase;
-    });
-
-    return res.status(201).json({
-      success: true,
-      message: "Phone registered successfully",
-      data: {
-        product: createdProduct,
-        purchase: updatedPurchase,
+        };
       },
     });
+
+    return res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error("Register Purchased Phone Error:", error);
+
+    if (error.statusCode === 409) {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
 
     const messages = {
       PURCHASE_NOT_FOUND: [404, "Purchase not found"],
@@ -400,16 +422,19 @@ const registerPurchasedPhone = async (req, res) => {
       success: false,
       message: "Internal server error",
     });
-  } finally {
-    await session.endSession();
   }
 };
-const registerPurchasedAccessory = async (req, res) => {
-  const session = await mongoose.startSession();
 
+const registerPurchasedAccessory = async (req, res) => {
   try {
     const { purchaseId, itemId } = req.params;
-    const { sellingPrice, notes } = req.body;
+    const {
+      sellingPrice,
+      notes,
+      targetLocation = "store",
+      allocations: rawAllocations,
+    } = req.body;
+    const idempotencyKey = extractIdempotencyKey(req);
 
     // 1. Validate IDs
     if (
@@ -434,139 +459,152 @@ const registerPurchasedAccessory = async (req, res) => {
       });
     }
 
-    let specifications;
-    let registeredProduct;
-    let updatedPurchase;
-
-    // 4. Start transaction
-    await session.withTransaction(async () => {
-      // Find purchase
-      const purchase = await Purchase.findById(purchaseId).session(session);
-
-      if (!purchase) {
-        throw new Error("PURCHASE_NOT_FOUND");
+    if (rawAllocations !== undefined) {
+      if (!Array.isArray(rawAllocations) || rawAllocations.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Allocations must be a non-empty array",
+        });
       }
-
-      if (purchase.status === "cancelled") {
-        throw new Error("PURCHASE_CANCELLED");
+      for (const alloc of rawAllocations) {
+        if (
+          !alloc ||
+          !["store", "warehouse"].includes(alloc.location) ||
+          !Number.isSafeInteger(alloc.quantity) ||
+          alloc.quantity < 1
+        ) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "Each allocation must specify location ('store' or 'warehouse') and positive integer quantity",
+          });
+        }
       }
-
-      // Find item inside purchase
-      const item = purchase.items.id(itemId);
-
-      if (!item) {
-        throw new Error("ITEM_NOT_FOUND");
-      }
-
-      if (!["accessory", "maintenance"].includes(item.productType)) {
-        throw new Error("NOT_AN_ACCESSORY");
-      }
-
-      const invoiceSpecifications =
-        item.specifications?.toObject?.() ?? item.specifications ?? {};
-      if (
-        req.body.specifications !== undefined &&
-        !isDeepStrictEqual(req.body.specifications, invoiceSpecifications)
-      ) {
-        throw new Error("SPECIFICATIONS_MISMATCH");
-      }
-      specifications = invoiceSpecifications;
-
-      // Check remaining quantity
-      const remainingQuantity = item.quantity - item.registeredQuantity;
-
-      if (remainingQuantity <= 0) {
-        throw new Error("QUANTITY_COMPLETED");
-      }
-
-      // 5. Find products with matching basic information
-      const existingProducts = await Product.find({
-        type: item.productType,
-        name: item.productName,
-        brand: item.brand,
-        isActive: true,
-      }).session(session);
-
-      // 6. Match model and specifications
-      const existingProduct = existingProducts.find((product) => {
-        const sameModel = (product.model || "") === (item.model || "");
-
-        const sameSpecifications = isDeepStrictEqual(
-          product.specifications?.toObject?.() ?? product.specifications ?? {},
-          specifications,
-        );
-
-        return sameModel && sameSpecifications;
+    } else if (!["store", "warehouse"].includes(targetLocation)) {
+      return res.status(400).json({
+        success: false,
+        message: "targetLocation must be 'store' or 'warehouse'",
       });
+    }
 
-      if (existingProduct) {
-        // 7. Update existing accessory
-        existingProduct.quantity += remainingQuantity;
+    const movementGroupId = createMovementGroupId();
 
-        // Update selling price for all existing stock
-        existingProduct.sellingPrice = sellingPrice;
+    const outcome = await withIdempotentTransaction({
+      operation: "purchase_receive",
+      idempotencyKey,
+      requestPayload: {
+        purchaseId,
+        itemId,
+        sellingPrice,
+        notes,
+        targetLocation,
+        allocations: rawAllocations,
+        specifications: req.body.specifications,
+      },
+      userId: req.user._id,
+      handler: async (session) => {
+        const purchase = await Purchase.findById(purchaseId).session(session);
+        if (!purchase) throw new Error("PURCHASE_NOT_FOUND");
+        if (purchase.status === "cancelled") throw new Error("PURCHASE_CANCELLED");
 
-        if (notes) {
-          existingProduct.notes = notes;
+        const item = purchase.items.id(itemId);
+        if (!item) throw new Error("ITEM_NOT_FOUND");
+        if (!["accessory", "maintenance"].includes(item.productType)) {
+          throw new Error("NOT_AN_ACCESSORY");
         }
 
-        await existingProduct.save({ session });
+        const invoiceSpecifications =
+          item.specifications?.toObject?.() ?? item.specifications ?? {};
+        if (
+          req.body.specifications !== undefined &&
+          !isDeepStrictEqual(req.body.specifications, invoiceSpecifications)
+        ) {
+          throw new Error("SPECIFICATIONS_MISMATCH");
+        }
 
-        registeredProduct = existingProduct;
-      } else {
-        // 8. Create new accessory
-        const barcode = `2${crypto.randomInt(100000000000, 1000000000000)}`;
+        const remainingQuantity = item.quantity - item.registeredQuantity;
+        if (remainingQuantity <= 0) {
+          throw new Error("QUANTITY_COMPLETED");
+        }
 
-        const products = await Product.create(
-          [
-            {
-              name: item.productName,
-              type: item.productType,
-              brand: item.brand,
-              model: item.model,
-              specifications,
-              sellingPrice,
-              quantity: remainingQuantity,
-              barcode,
-              notes,
-            },
-          ],
-          { session },
+        const effectiveAllocations = rawAllocations
+          ? rawAllocations.map((a) => ({
+              location: a.location,
+              quantity: a.quantity,
+            }))
+          : [{ location: targetLocation, quantity: remainingQuantity }];
+
+        const requestedTotal = effectiveAllocations.reduce(
+          (sum, a) => sum + a.quantity,
+          0,
         );
 
-        registeredProduct = products[0];
-      }
+        if (requestedTotal > remainingQuantity) {
+          throw new Error("ALLOCATION_EXCEEDS_REMAINING");
+        }
 
-      // 9. Update registered quantity
-      item.registeredQuantity = item.quantity;
+        const { product: registeredProduct } = await receiveGroupedProductStock({
+          type: item.productType,
+          name: item.productName,
+          brand: item.brand,
+          model: item.model,
+          specifications: invoiceSpecifications,
+          sellingPrice,
+          notes,
+          allocations: effectiveAllocations,
+          purchaseId: purchase._id,
+          purchasePrice: item.purchasePrice,
+          movementGroupId,
+          user: req.user,
+          referenceType: "Purchase",
+          referenceId: purchase._id,
+          session,
+        });
 
-      // Check if all invoice items are registered
-      const allItemsRegistered = purchase.items.every(
-        (purchaseItem) =>
-          purchaseItem.registeredQuantity === purchaseItem.quantity,
-      );
+        item.registeredQuantity += requestedTotal;
+        for (const alloc of effectiveAllocations) {
+          item.allocations.push({
+            location: alloc.location,
+            quantity: alloc.quantity,
+            purchasePrice: item.purchasePrice,
+            productId: registeredProduct._id,
+            registeredBy: req.user._id,
+            registeredAt: new Date(),
+            ...(idempotencyKey && { idempotencyKey }),
+          });
+        }
 
-      if (allItemsRegistered) {
-        purchase.status = "completed";
-      }
+        if (
+          purchase.items.every((pi) => pi.registeredQuantity === pi.quantity)
+        ) {
+          purchase.status = "completed";
+        }
+        await purchase.save({ session });
 
-      // 10. Save purchase
-      await purchase.save({ session });
-
-      updatedPurchase = purchase;
-    });
-
-    // 11. Send response
-    return res.status(200).json({
-      success: true,
-      message: "Accessory registered successfully",
-      data: {
-        product: registeredProduct,
-        purchase: updatedPurchase,
+        return {
+          status: 200,
+          body: {
+            success: true,
+            message: "Accessory registered successfully",
+            data: {
+              product: registeredProduct,
+              purchase,
+            },
+          },
+        };
       },
     });
+
+    return res.status(outcome.status).json(outcome.body);
   } catch (error) {
     console.error("Register Purchased Accessory Error:", error);
+
+    if (error.statusCode === 409) {
+      return res.status(409).json({
+        success: false,
+        message: error.message,
+      });
+    }
 
     const errors = {
       PURCHASE_NOT_FOUND: [404, "Purchase not found"],
@@ -578,6 +616,10 @@ const registerPurchasedAccessory = async (req, res) => {
         "Specifications must match the purchase invoice",
       ],
       QUANTITY_COMPLETED: [400, "All accessories have already been registered"],
+      ALLOCATION_EXCEEDS_REMAINING: [
+        400,
+        "Allocated quantity exceeds remaining unregistered purchase quantity",
+      ],
     };
 
     if (errors[error.message]) {
@@ -605,8 +647,6 @@ const registerPurchasedAccessory = async (req, res) => {
       success: false,
       message: "Internal server error",
     });
-  } finally {
-    await session.endSession();
   }
 };
 const cancelPurchase = async (req, res) => {
