@@ -342,7 +342,11 @@ export async function generateSaleInvoicePdfBlob(
     const subMeta = [
       item.brand,
       item.model,
-      item.productType === "phone" ? "هاتف محمول" : "إكسسوار",
+      item.productType === "phone"
+        ? "هاتف محمول"
+        : item.productType === "maintenance"
+          ? "صيانة"
+          : "إكسسوار",
     ]
       .filter(Boolean)
       .join(" • ");
@@ -828,7 +832,9 @@ export function PrintableSaleInvoiceModal({
                               •{" "}
                               {item.productType === "phone"
                                 ? "هاتف محمول"
-                                : "إكسسوار"}
+                                : item.productType === "maintenance"
+                                  ? "صيانة"
+                                  : "إكسسوار"}
                             </div>
                             {item.imei ? (
                               <div

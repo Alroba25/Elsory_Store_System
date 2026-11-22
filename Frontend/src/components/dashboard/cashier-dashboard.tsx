@@ -1138,7 +1138,9 @@ export function CashierDashboard({ user }: CashierDashboardProps) {
                                 <span className="rounded-md bg-surface px-2 py-0.5 text-[11px] font-semibold text-muted border border-border">
                                   {entry.product.type === "phone"
                                     ? "هاتف"
-                                    : "إكسسوار"}
+                                    : entry.product.type === "maintenance"
+                                      ? "صيانة"
+                                      : "إكسسوار"}
                                 </span>
                               </div>
                               <div className="flex flex-wrap items-center gap-3 text-xs text-muted">

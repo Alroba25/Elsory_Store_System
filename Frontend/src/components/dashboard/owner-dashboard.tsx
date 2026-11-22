@@ -85,6 +85,7 @@ import {
   type PhoneCondition,
   type ProductType,
   type ShiftReportGroup,
+  type StockLocation,
   type StoreProductItem,
   type StorePurchaseRecord,
   type StoreReturnRecord,
@@ -220,9 +221,12 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
   // Create Product Form State
   const [newProdName, setNewProdName] = useState<string>("");
   const [newProdType, setNewProdType] = useState<ProductType>("accessory");
+  const [newProdLocation, setNewProdLocation] =
+    useState<StockLocation>("store");
   const [newProdBrand, setNewProdBrand] = useState<string>("");
   const [newProdModel, setNewProdModel] = useState<string>("");
   const [newProdSellingPrice, setNewProdSellingPrice] = useState<string>("");
+  const [newProdCostPrice, setNewProdCostPrice] = useState<string>("");
   const [newProdQuantity, setNewProdQuantity] = useState<string>("1");
   const [newProdImei, setNewProdImei] = useState<string>("");
   const [newProdCondition, setNewProdCondition] =
@@ -241,13 +245,15 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
   const [editProdNotes, setEditProdNotes] = useState<string>("");
   const [isUpdatingProduct, setIsUpdatingProduct] = useState<boolean>(false);
 
-  // Stock Adjustment State (Accessories only)
+  // Stock Adjustment State (Accessories & Maintenance)
   const [stockTargetProduct, setStockTargetProduct] =
     useState<StoreProductItem | null>(null);
   const [stockOperation, setStockOperation] = useState<"increase" | "decrease">(
     "increase",
   );
+  const [stockLocation, setStockLocation] = useState<StockLocation>("store");
   const [stockQuantityInput, setStockQuantityInput] = useState<string>("1");
+  const [stockReason, setStockReason] = useState<string>("");
   const [isUpdatingStock, setIsUpdatingStock] = useState<boolean>(false);
 
   // 3. Suppliers
@@ -286,17 +292,22 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
   ]);
   const [isCreatingPurchase, setIsCreatingPurchase] = useState<boolean>(false);
 
-  // Register Purchased Item State (Phone / Accessory)
+  // Register Purchased Item State (Phone / Accessory / Maintenance)
   const [regTargetItem, setRegTargetItem] = useState<{
     purchaseId: string;
     itemId: string;
     productName: string;
     productType: ProductType;
+    remainingQuantity: number;
   } | null>(null);
   const [regImei, setRegImei] = useState<string>("");
   const [regSellingPrice, setRegSellingPrice] = useState<string>("");
   const [regCondition, setRegCondition] = useState<PhoneCondition>("new");
   const [regBattery, setRegBattery] = useState<string>("");
+  const [regTargetLocation, setRegTargetLocation] =
+    useState<StockLocation>("store");
+  const [regStoreQty, setRegStoreQty] = useState<string>("0");
+  const [regWarehouseQty, setRegWarehouseQty] = useState<string>("0");
   const [regNotes, setRegNotes] = useState<string>("");
   const [isRegisteringItem, setIsRegisteringItem] = useState<boolean>(false);
 
@@ -559,9 +570,19 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
     } else {
       const qty = Number(newProdQuantity);
       if (!Number.isInteger(qty) || qty <= 0) {
-        toast.error("كمية الإكسسوار يجب أن تكون عدداً صحيحاً موجباً");
+        toast.error("الكمية يجب أن تكون عدداً صحيحاً موجباً");
         return;
       }
+    }
+
+    const costPriceNum =
+      newProdCostPrice.trim() !== "" ? Number(newProdCostPrice) : undefined;
+    if (
+      costPriceNum !== undefined &&
+      (!Number.isFinite(costPriceNum) || costPriceNum < 0)
+    ) {
+      toast.error("سعر التكلفة يجب أن يكون رقماً غير سالب");
+      return;
     }
 
     setIsCreatingProduct(true);
@@ -577,6 +598,8 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
         brand: newProdBrand.trim(),
         model: newProdModel.trim() || undefined,
         sellingPrice,
+        costPrice: costPriceNum,
+        location: newProdLocation,
         ...(newProdType === "phone"
           ? {
               imei: newProdImei.trim(),
@@ -595,6 +618,7 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
       setNewProdBrand("");
       setNewProdModel("");
       setNewProdSellingPrice("");
+      setNewProdCostPrice("");
       setNewProdQuantity("1");
       setNewProdImei("");
       setNewProdBattery("");
@@ -674,6 +698,11 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
       return;
     }
 
+    if (!stockReason.trim()) {
+      toast.error("يرجى إدخال سبب تعديل الرصيد");
+      return;
+    }
+
     setIsUpdatingStock(true);
     try {
       const { message } = await updateOwnerAccessoryStock(
@@ -681,11 +710,14 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
         {
           operation: stockOperation,
           quantity: qty,
+          location: stockLocation,
+          reason: stockReason.trim(),
         },
       );
       toast.success(message);
       setStockTargetProduct(null);
       setStockQuantityInput("1");
+      setStockReason("");
       await loadProducts(
         showInactiveProducts,
         productTypeFilter,
@@ -909,6 +941,38 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
       return;
     }
 
+    let allocations: Array<{ location: StockLocation; quantity: number }> = [];
+    if (regTargetItem.productType !== "phone") {
+      const sQty = Number(regStoreQty || "0");
+      const wQty = Number(regWarehouseQty || "0");
+      if (
+        !Number.isInteger(sQty) ||
+        sQty < 0 ||
+        !Number.isInteger(wQty) ||
+        wQty < 0
+      ) {
+        toast.error("كميات المحل والمخزن يجب أن تكون أعداداً صحيحة غير سالبة");
+        return;
+      }
+      const totalReceiving = sQty + wQty;
+      if (totalReceiving <= 0) {
+        toast.error("يرجى إدخال كمية للاستلام في المحل أو المخزن");
+        return;
+      }
+      if (totalReceiving > regTargetItem.remainingQuantity) {
+        toast.error(
+          `إجمالي الكمية (${totalReceiving}) يتجاوز المتبقي للاستلام (${regTargetItem.remainingQuantity})`,
+        );
+        return;
+      }
+      allocations = [
+        ...(sQty > 0 ? [{ location: "store" as const, quantity: sQty }] : []),
+        ...(wQty > 0
+          ? [{ location: "warehouse" as const, quantity: wQty }]
+          : []),
+      ];
+    }
+
     setIsRegisteringItem(true);
     try {
       if (regTargetItem.productType === "phone") {
@@ -922,6 +986,7 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
             batteryHealth:
               regBattery.trim() !== "" ? Number(regBattery) : undefined,
             notes: regNotes.trim() || undefined,
+            targetLocation: regTargetLocation,
           },
         );
         toast.success(message);
@@ -933,6 +998,7 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
           {
             sellingPrice,
             notes: regNotes.trim() || undefined,
+            allocations,
           },
         );
         toast.success(message);
@@ -943,6 +1009,8 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
       setRegImei("");
       setRegSellingPrice("");
       setRegBattery("");
+      setRegStoreQty("0");
+      setRegWarehouseQty("0");
       setRegNotes("");
       await loadPurchases();
     } catch (error: unknown) {
@@ -1401,6 +1469,24 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
 
                 <div>
                   <label className="block text-xs font-semibold text-foreground mb-1">
+                    موقع الإضافة *
+                  </label>
+                  <select
+                    value={newProdLocation}
+                    onChange={(e) =>
+                      setNewProdLocation(e.target.value as StockLocation)
+                    }
+                    className="h-10 w-full rounded-xl border border-border bg-background px-3 text-xs font-semibold text-foreground"
+                  >
+                    <option value="store">المحل (Store — متاح للبيع)</option>
+                    <option value="warehouse">
+                      المخزن (Warehouse — للتخزين)
+                    </option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-foreground mb-1">
                     اسم المنتج *
                   </label>
                   <input
@@ -1451,6 +1537,21 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                     required
                     value={newProdSellingPrice}
                     onChange={(e) => setNewProdSellingPrice(e.target.value)}
+                    placeholder="0.00"
+                    className="h-10 w-full rounded-xl border border-border bg-background px-3 text-xs text-foreground"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-foreground mb-1">
+                    سعر التكلفة (ج.م — اختياري)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={newProdCostPrice}
+                    onChange={(e) => setNewProdCostPrice(e.target.value)}
                     placeholder="0.00"
                     className="h-10 w-full rounded-xl border border-border bg-background px-3 text-xs text-foreground"
                   />
@@ -1624,8 +1725,9 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
               <section className="rounded-2xl border border-[#2563EB] bg-surface p-6 space-y-4">
                 <div className="flex items-center justify-between">
                   <h4 className="text-sm font-bold text-foreground">
-                    تعديل كمية مخزون الإكسسوار: {stockTargetProduct.name}{" "}
-                    (الكمية الحالية: {stockTargetProduct.quantity})
+                    تعديل رصيد المخزون: {stockTargetProduct.name} (المحل:{" "}
+                    {stockTargetProduct.storeQuantity} • المخزن:{" "}
+                    {stockTargetProduct.warehouseQuantity})
                   </h4>
                   <button
                     type="button"
@@ -1637,8 +1739,18 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                 </div>
                 <form
                   onSubmit={handleAdjustAccessoryStock}
-                  className="grid grid-cols-1 gap-3 sm:grid-cols-3"
+                  className="grid grid-cols-1 gap-3 sm:grid-cols-5"
                 >
+                  <select
+                    value={stockLocation}
+                    onChange={(e) =>
+                      setStockLocation(e.target.value as StockLocation)
+                    }
+                    className="h-10 rounded-xl border border-border bg-background px-3 text-xs font-semibold text-foreground"
+                  >
+                    <option value="store">المحل (Store)</option>
+                    <option value="warehouse">المخزن (Warehouse)</option>
+                  </select>
                   <select
                     value={stockOperation}
                     onChange={(e) =>
@@ -1658,6 +1770,15 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                     required
                     value={stockQuantityInput}
                     onChange={(e) => setStockQuantityInput(e.target.value)}
+                    placeholder="الكمية"
+                    className="h-10 rounded-xl border border-border bg-background px-3 text-xs text-foreground"
+                  />
+                  <input
+                    type="text"
+                    required
+                    value={stockReason}
+                    onChange={(e) => setStockReason(e.target.value)}
+                    placeholder="سبب التعديل *"
                     className="h-10 rounded-xl border border-border bg-background px-3 text-xs text-foreground"
                   />
                   <button
@@ -1910,7 +2031,11 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                       <div className="space-y-2">
                         <div className="flex items-center justify-between text-xs text-muted">
                           <span className="rounded-md border border-border bg-surface px-2 py-0.5 font-semibold text-foreground">
-                            {item.type === "phone" ? "هاتف" : "إكسسوار"}
+                            {item.type === "phone"
+                              ? "هاتف"
+                              : item.type === "maintenance"
+                                ? "صيانة"
+                                : "إكسسوار"}
                           </span>
                           {item.barcode ? (
                             <span dir="ltr" className="font-mono">
@@ -2489,24 +2614,62 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
               </form>
             </section>
 
-            {/* Register Purchased Phone / Accessory Inline Form */}
+            {/* Register Purchased Phone / Accessory / Maintenance Inline Form */}
             {regTargetItem ? (
               <section className="rounded-2xl border border-[#2563EB] bg-surface p-6 space-y-4">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-sm font-bold text-foreground">
-                    تسجيل استلام بالمخزون: {regTargetItem.productName} (
-                    {regTargetItem.productType === "phone"
-                      ? "هاتف — يسجل جهاز واحد لكل عملية"
-                      : "إكسسوار — يسجل الكمية المتبقية بالكامل"}
-                    )
-                  </h4>
-                  <button
-                    type="button"
-                    onClick={() => setRegTargetItem(null)}
-                    className="text-xs text-muted hover:text-foreground"
-                  >
-                    إغلاق
-                  </button>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-sm font-bold text-foreground">
+                      تسجيل استلام بالمخزون: {regTargetItem.productName} (
+                      {regTargetItem.productType === "phone"
+                        ? "هاتف — يسجل جهاز واحد لكل عملية"
+                        : `${regTargetItem.productType === "maintenance" ? "صيانة" : "إكسسوار"} — المتبقي للاستلام: ${regTargetItem.remainingQuantity}`}
+                      )
+                    </h4>
+                    {regTargetItem.productType !== "phone" ? (
+                      <p className="mt-1 text-xs text-muted">
+                        يمكنك إدخال الكمية بالكامل في المحل أو المخزن أو تقسيمها
+                        بين الموقعين.
+                      </p>
+                    ) : null}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {regTargetItem.productType !== "phone" ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRegStoreQty(
+                              String(regTargetItem.remainingQuantity),
+                            );
+                            setRegWarehouseQty("0");
+                          }}
+                          className="rounded-lg border border-border bg-background px-2.5 py-1 text-xs font-semibold text-foreground hover:border-[#2563EB]"
+                        >
+                          الكل للمحل ({regTargetItem.remainingQuantity})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setRegStoreQty("0");
+                            setRegWarehouseQty(
+                              String(regTargetItem.remainingQuantity),
+                            );
+                          }}
+                          className="rounded-lg border border-border bg-background px-2.5 py-1 text-xs font-semibold text-foreground hover:border-[#2563EB]"
+                        >
+                          الكل للمخزن ({regTargetItem.remainingQuantity})
+                        </button>
+                      </>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => setRegTargetItem(null)}
+                      className="text-xs text-muted hover:text-foreground"
+                    >
+                      إغلاق
+                    </button>
+                  </div>
                 </div>
 
                 <form
@@ -2524,6 +2687,20 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                         placeholder="رقم IMEI (15 رقماً) *"
                         className="h-10 rounded-xl border border-border bg-background px-3 font-mono text-xs text-foreground"
                       />
+                      <select
+                        value={regTargetLocation}
+                        onChange={(e) =>
+                          setRegTargetLocation(e.target.value as StockLocation)
+                        }
+                        className="h-10 rounded-xl border border-border bg-background px-3 text-xs font-semibold text-foreground"
+                      >
+                        <option value="store">
+                          استلام في المحل (توليد باركود)
+                        </option>
+                        <option value="warehouse">
+                          استلام في المخزن (بدون باركود)
+                        </option>
+                      </select>
                       <select
                         value={regCondition}
                         onChange={(e) =>
@@ -2544,36 +2721,75 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                         className="h-10 rounded-xl border border-border bg-background px-3 text-xs text-foreground"
                       />
                     </>
-                  ) : null}
+                  ) : (
+                    <>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-muted mb-1">
+                          كمية المحل (Store)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max={regTargetItem.remainingQuantity}
+                          step="1"
+                          value={regStoreQty}
+                          onChange={(e) => setRegStoreQty(e.target.value)}
+                          placeholder="0"
+                          className="h-10 w-full rounded-xl border border-border bg-background px-3 text-xs text-foreground"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-muted mb-1">
+                          كمية المخزن (Warehouse)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max={regTargetItem.remainingQuantity}
+                          step="1"
+                          value={regWarehouseQty}
+                          onChange={(e) => setRegWarehouseQty(e.target.value)}
+                          placeholder="0"
+                          className="h-10 w-full rounded-xl border border-border bg-background px-3 text-xs text-foreground"
+                        />
+                      </div>
+                    </>
+                  )}
 
-                  <input
-                    type="number"
-                    min="0"
-                    step="0.01"
-                    required
-                    value={regSellingPrice}
-                    onChange={(e) => setRegSellingPrice(e.target.value)}
-                    placeholder="سعر البيع للعميل (ج.م) *"
-                    className="h-10 rounded-xl border border-border bg-background px-3 text-xs text-foreground"
-                  />
+                  <div className="flex flex-col justify-end">
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      required
+                      value={regSellingPrice}
+                      onChange={(e) => setRegSellingPrice(e.target.value)}
+                      placeholder="سعر البيع للعميل (ج.م) *"
+                      className="h-10 rounded-xl border border-border bg-background px-3 text-xs text-foreground"
+                    />
+                  </div>
 
-                  <input
-                    type="text"
-                    value={regNotes}
-                    onChange={(e) => setRegNotes(e.target.value)}
-                    placeholder="ملاحظات (اختياري)"
-                    className="h-10 rounded-xl border border-border bg-background px-3 text-xs text-foreground"
-                  />
+                  <div className="flex flex-col justify-end">
+                    <input
+                      type="text"
+                      value={regNotes}
+                      onChange={(e) => setRegNotes(e.target.value)}
+                      placeholder="ملاحظات (اختياري)"
+                      className="h-10 rounded-xl border border-border bg-background px-3 text-xs text-foreground"
+                    />
+                  </div>
 
-                  <button
-                    type="submit"
-                    disabled={isRegisteringItem}
-                    className="h-10 rounded-xl bg-[#242424] text-white dark:bg-[#F5F5F5] dark:text-[#111111] px-4 text-xs font-bold"
-                  >
-                    {isRegisteringItem
-                      ? "جاري التسجيل..."
-                      : "تأكيد الإدخال للمخزون"}
-                  </button>
+                  <div className="flex flex-col justify-end sm:col-span-4">
+                    <button
+                      type="submit"
+                      disabled={isRegisteringItem}
+                      className="h-10 rounded-xl bg-[#242424] text-white dark:bg-[#F5F5F5] dark:text-[#111111] px-4 text-xs font-bold"
+                    >
+                      {isRegisteringItem
+                        ? "جاري التسجيل..."
+                        : "تأكيد الإدخال للمخزون"}
+                    </button>
+                  </div>
                 </form>
               </section>
             ) : null}
@@ -2748,7 +2964,9 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                               {item.productName} ({item.brand}) —{" "}
                               {item.productType === "phone"
                                 ? "هاتف"
-                                : "إكسسوار"}
+                                : item.productType === "maintenance"
+                                  ? "صيانة"
+                                  : "إكسسوار"}
                             </div>
                             <div className="text-muted">
                               الكمية المشتراة: {item.quantity} • المسجل
@@ -2760,19 +2978,25 @@ export function OwnerDashboard({ user }: OwnerDashboardProps) {
                           {canRegister ? (
                             <button
                               type="button"
-                              onClick={() =>
+                              onClick={() => {
                                 setRegTargetItem({
                                   purchaseId: selectedPurchase.id,
                                   itemId: item.id,
                                   productName: item.productName,
                                   productType: item.productType,
-                                })
-                              }
+                                  remainingQuantity: remainingToRegister,
+                                });
+                                setRegTargetLocation("store");
+                                setRegStoreQty(String(remainingToRegister));
+                                setRegWarehouseQty("0");
+                              }}
                               className="rounded-xl bg-[#2563EB] px-3.5 py-1.5 text-xs font-semibold text-white"
                             >
                               {item.productType === "phone"
                                 ? "تسجيل جهاز هاتف (IMEI)"
-                                : "تسجيل كمية الإكسسوار بالمخزون"}
+                                : item.productType === "maintenance"
+                                  ? "تسجيل كمية الصيانة بالمخزون"
+                                  : "تسجيل كمية الإكسسوار بالمخزون"}
                             </button>
                           ) : (
                             <span className="rounded-lg bg-success/10 px-2.5 py-1 text-xs font-bold text-success">

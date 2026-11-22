@@ -111,7 +111,9 @@ export interface CreateProductPayload {
   model?: string;
   specifications?: Record<string, unknown>;
   sellingPrice: number;
+  costPrice?: number;
   quantity?: number;
+  location?: StockLocation;
   imei?: string;
   condition?: PhoneCondition;
   batteryHealth?: number;
@@ -1130,6 +1132,9 @@ export async function createOwnerProduct(
 ): Promise<{ message: string; product: StoreProductItem }> {
   const data = await apiRequest<JsonRecord>("/products", {
     method: "POST",
+    headers: {
+      "Idempotency-Key": generateIdempotencyKey("prod"),
+    },
     body: JSON.stringify(payload),
   });
   if (!isRecord(data.product)) {
@@ -1161,11 +1166,19 @@ export async function updateOwnerProduct(
 
 export async function updateOwnerAccessoryStock(
   productId: string,
-  payload: { operation: "increase" | "decrease"; quantity: number },
+  payload: {
+    operation: "increase" | "decrease";
+    quantity: number;
+    location: StockLocation;
+    reason: string;
+  },
 ): Promise<{ message: string; product: StoreProductItem }> {
   const clean = encodeURIComponent(productId.trim());
   const data = await apiRequest<JsonRecord>(`/products/${clean}/stock`, {
     method: "PATCH",
+    headers: {
+      "Idempotency-Key": generateIdempotencyKey("adj"),
+    },
     body: JSON.stringify(payload),
   });
   if (!isRecord(data.product)) {
@@ -1347,6 +1360,7 @@ export async function registerPurchasedPhoneItem(
     condition: PhoneCondition;
     batteryHealth?: number;
     notes?: string;
+    targetLocation?: StockLocation;
   },
 ): Promise<{ message: string; purchase: StorePurchaseRecord }> {
   const pId = encodeURIComponent(purchaseId.trim());
@@ -1355,6 +1369,9 @@ export async function registerPurchasedPhoneItem(
     `/purchase/${pId}/items/${iId}/register-phone`,
     {
       method: "POST",
+      headers: {
+        "Idempotency-Key": generateIdempotencyKey("reg-ph"),
+      },
       body: JSON.stringify(payload),
     },
   );
@@ -1374,6 +1391,8 @@ export async function registerPurchasedAccessoryItem(
   payload: {
     sellingPrice: number;
     notes?: string;
+    targetLocation?: StockLocation;
+    allocations?: Array<{ location: StockLocation; quantity: number }>;
   },
 ): Promise<{ message: string; purchase: StorePurchaseRecord }> {
   const pId = encodeURIComponent(purchaseId.trim());
@@ -1382,6 +1401,9 @@ export async function registerPurchasedAccessoryItem(
     `/purchase/${pId}/items/${iId}/register-accessory`,
     {
       method: "POST",
+      headers: {
+        "Idempotency-Key": generateIdempotencyKey("reg-acc"),
+      },
       body: JSON.stringify(payload),
     },
   );
