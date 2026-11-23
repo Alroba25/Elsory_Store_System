@@ -161,7 +161,7 @@ function SvgDonutChart({
       </div>
 
       {total === 0 ? (
-        <div className="flex min-h-[180px] flex-col items-center justify-center rounded-xl border border-dashed border-border bg-surface/50 p-6 text-center">
+        <div className="flex min-h-45 flex-col items-center justify-center rounded-xl border border-dashed border-border bg-surface/50 p-6 text-center">
           <PieChart className="h-7 w-7 text-muted mb-2" aria-hidden="true" />
           <p className="text-xs font-semibold text-muted">{emptyText}</p>
         </div>
@@ -273,7 +273,7 @@ function HorizontalComparisonChart({
       </div>
 
       {maxVal === 0 ? (
-        <div className="flex min-h-[180px] flex-col items-center justify-center rounded-xl border border-dashed border-border bg-surface/50 p-6 text-center">
+        <div className="flex min-h-45 flex-col items-center justify-center rounded-xl border border-dashed border-border bg-surface/50 p-6 text-center">
           <BarChart3 className="h-7 w-7 text-muted mb-2" aria-hidden="true" />
           <p className="text-xs font-semibold text-muted">{emptyText}</p>
         </div>
@@ -598,11 +598,16 @@ export function OwnerAnalyticsWorkspace({
               className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#2563EB] px-4 text-xs font-bold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
             >
               {isExportingPdf ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                <Loader2
+                  className="h-3.5 w-3.5 animate-spin"
+                  aria-hidden="true"
+                />
               ) : (
                 <Download className="h-3.5 w-3.5" aria-hidden="true" />
               )}
-              <span>{isExportingPdf ? "جاري إنشاء PDF..." : "تحميل التقرير PDF"}</span>
+              <span>
+                {isExportingPdf ? "جاري إنشاء PDF..." : "تحميل التقرير PDF"}
+              </span>
             </button>
 
             <button
@@ -758,7 +763,11 @@ export function OwnerAnalyticsWorkspace({
 
       {/* Skeleton Loading State */}
       {isLoading ? (
-        <div className="space-y-6" aria-busy="true" aria-label="جاري تحميل التقارير">
+        <div
+          className="space-y-6"
+          aria-busy="true"
+          aria-label="جاري تحميل التقارير"
+        >
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
             {Array.from({ length: 5 }).map((_, idx) => (
               <div
@@ -852,7 +861,8 @@ export function OwnerAnalyticsWorkspace({
                   </strong>
                   <p className="text-[11px] text-muted">
                     المحصل ({formatEgp(salesReport.sales.collectedAmount)}) -
-                    المسترد ({formatEgp(salesReport.returns.actualRefundedAmount)})
+                    المسترد (
+                    {formatEgp(salesReport.returns.actualRefundedAmount)})
                   </p>
                 </div>
               </div>
@@ -1044,8 +1054,8 @@ export function OwnerAnalyticsWorkspace({
                       تفصيل التحصيل والمرتجعات حسب طريقة الدفع
                     </h4>
                     <p className="text-[11px] text-muted">
-                      فصل كامل بين الكاش بالدرج وماكينة الفيزا وInstaPay والمحافظ
-                      الإلكترونية
+                      فصل كامل بين الكاش بالدرج وماكينة الفيزا وInstaPay
+                      والمحافظ الإلكترونية
                     </p>
                   </div>
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -1243,9 +1253,9 @@ export function OwnerAnalyticsWorkspace({
                     {formatEgp(purchasesReport.report.totalRemaining)}
                   </strong>
                   <span className="text-[11px] text-muted block">
-                    جزئياً: {formatNumberAr(purchasesReport.report.partiallyPaid)}{" "}
-                    • غير مدفوعة:{" "}
-                    {formatNumberAr(purchasesReport.report.unpaid)}
+                    جزئياً:{" "}
+                    {formatNumberAr(purchasesReport.report.partiallyPaid)} • غير
+                    مدفوعة: {formatNumberAr(purchasesReport.report.unpaid)}
                   </span>
                 </div>
 
@@ -1461,8 +1471,8 @@ export function OwnerAnalyticsWorkspace({
                 </h4>
                 <p className="text-xs text-muted mt-0.5">
                   تجميع زمني حقيقي من قاعدة البيانات حسب التوقيت المحلي للمحل (
-                  {salesReport.period.timeZone ?? "Africa/Cairo"}) — مرّر
-                  المؤشر على أي يوم لعرض التفاصيل
+                  {salesReport.period.timeZone ?? "Africa/Cairo"}) — مرّر المؤشر
+                  على أي يوم لعرض التفاصيل
                 </p>
               </div>
 
@@ -1484,7 +1494,7 @@ export function OwnerAnalyticsWorkspace({
             </div>
 
             {combinedTimeline.length === 0 ? (
-              <div className="flex min-h-[220px] flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-background/60 p-8 text-center">
+              <div className="flex min-h-55  flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-background/60 p-8 text-center">
                 <BarChart3
                   className="h-8 w-8 text-muted mb-2"
                   aria-hidden="true"
@@ -1506,10 +1516,7 @@ export function OwnerAnalyticsWorkspace({
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div className="font-bold text-foreground">
                         تاريخ اليوم:{" "}
-                        <span
-                          dir="ltr"
-                          className="font-mono text-[#2563EB]"
-                        >
+                        <span dir="ltr" className="font-mono text-[#2563EB]">
                           {hoveredTimelinePoint.date}
                         </span>
                       </div>
@@ -1559,7 +1566,7 @@ export function OwnerAnalyticsWorkspace({
 
                 {/* Interactive Grouped Bar Chart */}
                 <div className="overflow-x-auto pb-2">
-                  <div className="min-w-[560px] rounded-2xl border border-border bg-background p-5">
+                  <div className="min-w-140 rounded-2xl border border-border bg-background p-5">
                     <div className="flex h-56 items-end gap-3 border-b border-border pb-3">
                       {combinedTimeline.map((pt) => {
                         const salesH =
@@ -1588,7 +1595,7 @@ export function OwnerAnalyticsWorkspace({
                             key={pt.date}
                             onMouseEnter={() => setHoveredTimelinePoint(pt)}
                             onClick={() => setHoveredTimelinePoint(pt)}
-                            className={`group flex flex-1 min-w-[48px] cursor-pointer flex-col items-center justify-end rounded-xl px-1.5 pt-2 transition-colors ${
+                            className={`group flex flex-1 min-w-12 cursor-pointer flex-col items-center justify-end rounded-xl px-1.5 pt-2 transition-colors ${
                               isHovered
                                 ? "bg-[#2563EB]/10"
                                 : "hover:bg-surface-secondary"
@@ -1641,9 +1648,7 @@ export function OwnerAnalyticsWorkspace({
                         <th className="px-4 py-3 font-bold text-foreground">
                           التاريخ
                         </th>
-                        <th className="px-4 py-3 font-bold">
-                          فواتير البيع
-                        </th>
+                        <th className="px-4 py-3 font-bold">فواتير البيع</th>
                         <th className="px-4 py-3 font-bold text-[#2563EB]">
                           صافي المبيعات
                         </th>
