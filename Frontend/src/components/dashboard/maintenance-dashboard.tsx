@@ -134,9 +134,11 @@ export function MaintenanceDashboard({ user }: MaintenanceDashboardProps) {
               </p>
             </div>
 
-            <div className="flex flex-col gap-3 sm:min-w-[260px]">
+            <div className="flex flex-col gap-3 sm:min-w-65">
               <div className="rounded-2xl border border-[#242424] bg-[#1A1A1D] px-4 py-3 text-xs">
-                <div className="text-[#A6A6A6]">إجمالي أصناف الصيانة المتاحة</div>
+                <div className="text-[#A6A6A6]">
+                  إجمالي أصناف الصيانة المتاحة
+                </div>
                 <div className="text-xl font-bold text-[#F5F5F5] mt-1">
                   {totalProducts} صنف
                 </div>
@@ -214,7 +216,7 @@ export function MaintenanceDashboard({ user }: MaintenanceDashboardProps) {
             </div>
 
             {isLoading ? (
-              <div className="flex min-h-[220px] flex-col items-center justify-center gap-3 text-muted">
+              <div className="flex min-h-55 flex-col items-center justify-center gap-3 text-muted">
                 <Loader2 className="h-6 w-6 animate-spin text-[#2563EB]" />
                 <span className="text-xs font-medium">
                   جاري تحميل كتالوج الصيانة...
@@ -379,7 +381,9 @@ export function MaintenanceDashboard({ user }: MaintenanceDashboardProps) {
                     </h4>
                     <p className="text-xs text-muted">
                       {selectedProduct.brand}
-                      {selectedProduct.model ? ` — ${selectedProduct.model}` : ""}
+                      {selectedProduct.model
+                        ? ` — ${selectedProduct.model}`
+                        : ""}
                     </p>
                   </div>
                   <span className="rounded-xl bg-[#2563EB]/10 px-3 py-1 text-sm font-bold text-[#2563EB]">
@@ -396,7 +400,10 @@ export function MaintenanceDashboard({ user }: MaintenanceDashboardProps) {
                   </div>
                   <div className="rounded-xl border border-border bg-surface p-3">
                     <span className="text-muted block">الباركود</span>
-                    <strong dir="ltr" className="text-sm font-mono text-foreground">
+                    <strong
+                      dir="ltr"
+                      className="text-sm font-mono text-foreground"
+                    >
                       {selectedProduct.barcode || "—"}
                     </strong>
                   </div>

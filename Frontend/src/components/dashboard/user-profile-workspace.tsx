@@ -289,7 +289,7 @@ export function UserProfileWorkspace({
           </div>
 
           {isLoadingProfile ? (
-            <div className="flex min-h-[180px] items-center justify-center">
+            <div className="flex min-h-45 items-center justify-center">
               <Loader2 className="h-6 w-6 animate-spin text-[#2563EB]" />
             </div>
           ) : (

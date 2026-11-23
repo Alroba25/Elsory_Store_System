@@ -19,7 +19,7 @@ export function Code128BarcodeSvg({
     <svg
       xmlns="http://www.w3.org/2000/svg"
       viewBox={`0 0 ${totalModules} ${height}`}
-      className="mx-auto block w-full max-w-[220px] bg-white"
+      className="mx-auto block w-full max-w-55 bg-white"
       style={{ height: `${height}px` }}
       preserveAspectRatio="none"
       shapeRendering="crispEdges"

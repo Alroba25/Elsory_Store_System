@@ -205,7 +205,7 @@ export function AccessoriesDashboard({ user }: AccessoriesDashboardProps) {
 
         {/* Loading or Error States */}
         {isLoading ? (
-          <div className="flex min-h-[260px] flex-col items-center justify-center gap-3 rounded-2xl border border-border bg-surface p-8">
+          <div className="flex min-h-65 flex-col items-center justify-center gap-3 rounded-2xl border border-border bg-surface p-8">
             <Loader2
               className="h-6 w-6 animate-spin text-[#2563EB]"
               aria-hidden="true"

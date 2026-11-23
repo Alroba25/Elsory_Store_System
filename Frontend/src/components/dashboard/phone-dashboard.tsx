@@ -132,15 +132,10 @@ export function PhoneDashboard({ user }: PhoneDashboardProps) {
           <div className="relative z-10 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
             <div className="space-y-3 max-w-2xl">
               <div className="inline-flex flex-wrap items-center gap-2 rounded-full border border-[#242424] bg-[#1A1A1D] px-3.5 py-1 text-xs font-semibold text-[#F5F5F5]">
-                <Award
-                  className="h-4 w-4 text-[#2563EB]"
-                  aria-hidden="true"
-                />
+                <Award className="h-4 w-4 text-[#2563EB]" aria-hidden="true" />
                 <span>{roleConfig.accentLabel}</span>
                 <span className="text-[#A6A6A6]">•</span>
-                <span className="text-[#A6A6A6]">
-                  موزع معتمد لمنتجات Apple
-                </span>
+                <span className="text-[#A6A6A6]">موزع معتمد لمنتجات Apple</span>
               </div>
 
               <h2 className="text-2xl sm:text-3xl font-bold tracking-tight text-[#F5F5F5]">
@@ -225,7 +220,7 @@ export function PhoneDashboard({ user }: PhoneDashboardProps) {
 
         {/* Loading or Error States */}
         {isLoading ? (
-          <div className="flex min-h-[260px] flex-col items-center justify-center gap-3 rounded-2xl border border-border bg-surface p-8">
+          <div className="flex min-h-65 flex-col items-center justify-center gap-3 rounded-2xl border border-border bg-surface p-8">
             <Loader2
               className="h-6 w-6 animate-spin text-[#2563EB]"
               aria-hidden="true"
