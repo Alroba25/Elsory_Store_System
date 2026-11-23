@@ -29,7 +29,6 @@ import {
   fetchStockTransfers,
   fetchUnallocatedProducts,
   generateIdempotencyKey,
-  getInventoryAuditCsvUrl,
   type AuditChangedProductConflict,
   type AuditSnapshotResponse,
   type AuditSnapshotRow,
@@ -43,6 +42,7 @@ import {
   type StoreProductItem,
   type TransferDirection,
 } from "@/src/services/dashboard.service";
+import { downloadInventoryAuditPdf } from "@/src/utils/elsory-pdf-reports";
 
 export type WarehouseSectionId =
   | "transfers"
@@ -193,6 +193,27 @@ export function OwnerWarehouseWorkspace({
     audit: InventoryAuditRecord;
     movements: StockMovementRecord[];
   } | null>(null);
+  const [downloadingAuditId, setDownloadingAuditId] = useState<string | null>(
+    null,
+  );
+
+  const handleDownloadAuditPdf = async (audit: InventoryAuditRecord) => {
+    if (downloadingAuditId) return;
+    setDownloadingAuditId(audit.id);
+    try {
+      let fullAudit = audit;
+      if (!audit.items || audit.items.length === 0) {
+        const detail = await fetchInventoryAuditById(audit.id);
+        fullAudit = detail.audit;
+      }
+      await downloadInventoryAuditPdf(fullAudit);
+      toast.success("تم تحميل تقرير الجرد بصيغة PDF بنجاح");
+    } catch {
+      toast.error("تعذر إنشاء ملف PDF لتقرير الجرد");
+    } finally {
+      setDownloadingAuditId(null);
+    }
+  };
 
   const loadAuditSection = useCallback(async (loc: StockLocation) => {
     setIsLoadingSnapshot(true);
@@ -1324,15 +1345,19 @@ export function OwnerWarehouseWorkspace({
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <a
-                      href={getInventoryAuditCsvUrl(aud.id)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 rounded-xl border border-border bg-surface px-3 py-1.5 font-semibold text-foreground"
+                    <button
+                      type="button"
+                      onClick={() => void handleDownloadAuditPdf(aud)}
+                      disabled={downloadingAuditId === aud.id}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-[#2563EB] px-3 py-1.5 font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-60"
                     >
-                      <Download className="h-3.5 w-3.5" />
-                      <span>CSV</span>
-                    </a>
+                      {downloadingAuditId === aud.id ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Download className="h-3.5 w-3.5" />
+                      )}
+                      <span>تحميل PDF</span>
+                    </button>
                     <button
                       type="button"
                       onClick={async () => {
@@ -1363,13 +1388,32 @@ export function OwnerWarehouseWorkspace({
                     {selectedAuditDetail.audit.auditNumber}
                   </span>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setSelectedAuditDetail(null)}
-                  className="text-muted hover:text-foreground"
-                >
-                  إغلاق
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleDownloadAuditPdf(selectedAuditDetail.audit)
+                    }
+                    disabled={
+                      downloadingAuditId === selectedAuditDetail.audit.id
+                    }
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#2563EB] px-3 py-1 text-xs font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-60"
+                  >
+                    {downloadingAuditId === selectedAuditDetail.audit.id ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Download className="h-3 w-3" />
+                    )}
+                    <span>تحميل PDF</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedAuditDetail(null)}
+                    className="text-muted hover:text-foreground"
+                  >
+                    إغلاق
+                  </button>
+                </div>
               </div>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {(["phone", "accessory", "maintenance"] as ProductType[]).map(

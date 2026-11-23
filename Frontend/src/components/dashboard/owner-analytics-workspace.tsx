@@ -6,6 +6,8 @@ import {
   AlertCircle,
   BarChart3,
   Calendar,
+  Download,
+  Loader2,
   PieChart,
   RefreshCw,
   RotateCcw,
@@ -23,6 +25,7 @@ import {
   type ReturnsReportData,
   type SalesReportData,
 } from "@/src/services/dashboard.service";
+import { downloadAnalyticsReportPdf } from "@/src/utils/elsory-pdf-reports";
 
 export type DatePresetId =
   | "today"
@@ -375,6 +378,28 @@ export function OwnerAnalyticsWorkspace({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [hoveredTimelinePoint, setHoveredTimelinePoint] =
     useState<CombinedTimelinePoint | null>(null);
+  const [isExportingPdf, setIsExportingPdf] = useState<boolean>(false);
+
+  const handleExportAnalyticsPdf = async () => {
+    if (!salesReport || !purchasesReport || !returnsReport || isExportingPdf) {
+      return;
+    }
+    setIsExportingPdf(true);
+    try {
+      await downloadAnalyticsReportPdf({
+        salesReport,
+        purchasesReport,
+        returnsReport,
+        fromDate,
+        toDate,
+      });
+      toast.success("تم تحميل التقرير المالي الشامل (PDF) بنجاح");
+    } catch {
+      toast.error("تعذر إنشاء ملف PDF للتقرير المالي");
+    } finally {
+      setIsExportingPdf(false);
+    }
+  };
 
   const loadAllReports = useCallback(async (from: string, to: string) => {
     if (!from || !to) {
@@ -559,18 +584,40 @@ export function OwnerAnalyticsWorkspace({
             </p>
           </div>
 
-          <button
-            type="button"
-            onClick={() => void loadAllReports(fromDate, toDate)}
-            disabled={isLoading}
-            className="inline-flex h-10 items-center gap-2 rounded-xl border border-border bg-background px-4 text-xs font-semibold text-foreground transition-colors hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
-          >
-            <RefreshCw
-              className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`}
-              aria-hidden="true"
-            />
-            <span>تحديث البيانات</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => void handleExportAnalyticsPdf()}
+              disabled={
+                isLoading ||
+                isExportingPdf ||
+                !salesReport ||
+                !purchasesReport ||
+                !returnsReport
+              }
+              className="inline-flex h-10 items-center gap-2 rounded-xl bg-[#2563EB] px-4 text-xs font-bold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            >
+              {isExportingPdf ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              ) : (
+                <Download className="h-3.5 w-3.5" aria-hidden="true" />
+              )}
+              <span>{isExportingPdf ? "جاري إنشاء PDF..." : "تحميل التقرير PDF"}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void loadAllReports(fromDate, toDate)}
+              disabled={isLoading}
+              className="inline-flex h-10 items-center gap-2 rounded-xl border border-border bg-background px-4 text-xs font-semibold text-foreground transition-colors hover:border-[#2563EB] hover:text-[#2563EB] disabled:opacity-50"
+            >
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${isLoading ? "animate-spin" : ""}`}
+                aria-hidden="true"
+              />
+              <span>تحديث البيانات</span>
+            </button>
+          </div>
         </div>
 
         {/* Quick Date Presets */}
